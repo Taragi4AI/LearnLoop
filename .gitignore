@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node / project-specific
+node_modules/
+.env
+*.log
+
+# Unrelated local documents
+LearnLoop_*.pdf
+LearnLoop_*.docx
