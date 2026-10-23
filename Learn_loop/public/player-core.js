@@ -99,8 +99,53 @@ export function createPlayerController(media) {
 
     togglePlay() {
       if (!this.canControl()) return;
-      if (media.paused) media.play(); else media.pause();
+      if (media.paused) {
+        // media.play() returns a promise that rejects if playback is interrupted
+        // (e.g. a pause() right after). Swallow that benign rejection so it does
+        // not surface as an uncaught promise error.
+        const p = media.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } else {
+        media.pause();
+      }
     },
+
+    /** Explicitly pause the real media element. Idempotent and independent of
+     *  the controller's state machine — safe to call on Looper activation even
+     *  if state tracking lags. No-op if media isn't loaded/controllable. */
+    pause() {
+      if (!this.canControl()) return;
+      try { if (!media.paused) media.pause(); } catch {}
+    },
+
+    /** Explicitly play. Idempotent; no-op if not controllable. Swallows the
+     *  benign play()-interrupted-by-pause() promise rejection. */
+    play() {
+      if (!this.canControl()) return;
+      try {
+        if (media.paused) {
+          const p = media.play();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      } catch {}
+    },
+
+    /** True if media is loaded and currently playing (reads the real element). */
+    isPlaying() {
+      return this.canControl() && !media.paused;
+    },
+
+    // --- Volume / mute / rate / position (Phase 5 read + write surface) ---
+    setVolume(level) {
+      const v = Math.max(0, Math.min(1, Number(level)));
+      if (!Number.isFinite(v)) return null;
+      media.volume = v; return v;
+    },
+    getVolume() { return typeof media.volume === 'number' ? media.volume : null; },
+    setMuted(flag) { media.muted = !!flag; return media.muted; },
+    isMuted() { return !!media.muted; },
+    position() { return media.currentTime || 0; },
+    rate() { return media.playbackRate || 1; },
 
     seekTo(target) {
       if (!this.canControl()) return;

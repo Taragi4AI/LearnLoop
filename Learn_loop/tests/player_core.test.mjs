@@ -145,3 +145,89 @@ test('error state blocks control and persists over pause', () => {
   p.markPaused(); // must not override an error
   assert.equal(p.state, STATE.ERROR);
 });
+
+// --- G3.2 LL-G3.2-004: explicit pause() for Looper activation ---
+test('pause() pauses a playing media element (idempotent)', () => {
+  const media = fakeMedia();
+  const p = createPlayerController(media);
+  p.markLoading(); p.markReady();
+  media.play();
+  assert.equal(media.paused, false);
+  assert.equal(p.isPlaying(), true);
+  p.pause();
+  assert.equal(media.paused, true);
+  // idempotent: calling again keeps it paused, does not toggle to play
+  p.pause();
+  assert.equal(media.paused, true);
+  assert.equal(p.isPlaying(), false);
+});
+
+test('pause() is a no-op when media is not controllable (no video loaded)', () => {
+  const media = fakeMedia();
+  const p = createPlayerController(media);   // state IDLE, canControl() false
+  // Should not throw and should not attempt to touch an unready element.
+  p.pause();
+  assert.equal(p.isPlaying(), false);
+});
+
+test('pause() leaves an already-paused lecture paused', () => {
+  const media = fakeMedia();
+  const p = createPlayerController(media);
+  p.markLoading(); p.markReady();            // ready but paused
+  assert.equal(media.paused, true);
+  p.pause();
+  assert.equal(media.paused, true);          // stays paused, never plays
+});
+
+// --- G5.3: play(), volume/mute/rate/position read+write surface ---
+function fakeMediaFull() {
+  const m = fakeMedia();
+  m.volume = 1; m.muted = false;
+  return m;
+}
+
+test('play() starts a paused, controllable lecture (idempotent)', () => {
+  const media = fakeMediaFull();
+  const p = createPlayerController(media);
+  p.markLoading(); p.markReady();
+  p.play();
+  assert.equal(media.paused, false);
+  assert.equal(p.isPlaying(), true);
+  p.play();                                   // idempotent — stays playing
+  assert.equal(media.paused, false);
+});
+
+test('play() is a no-op when not controllable', () => {
+  const media = fakeMediaFull();
+  const p = createPlayerController(media);    // IDLE
+  p.play();
+  assert.equal(media.paused, true);
+});
+
+test('setVolume clamps to [0,1] and getVolume reflects it', () => {
+  const media = fakeMediaFull();
+  const p = createPlayerController(media);
+  assert.equal(p.setVolume(0.5), 0.5);
+  assert.equal(media.volume, 0.5);
+  assert.equal(p.setVolume(5), 1);            // clamp high
+  assert.equal(p.setVolume(-1), 0);           // clamp low
+  assert.equal(p.getVolume(), 0);
+});
+
+test('setMuted / isMuted toggle the media mute flag', () => {
+  const media = fakeMediaFull();
+  const p = createPlayerController(media);
+  assert.equal(p.setMuted(true), true);
+  assert.equal(media.muted, true);
+  assert.equal(p.isMuted(), true);
+  assert.equal(p.setMuted(false), false);
+  assert.equal(p.isMuted(), false);
+});
+
+test('position() and rate() read the live element', () => {
+  const media = fakeMediaFull();
+  const p = createPlayerController(media);
+  media.currentTime = 12.5; media.playbackRate = 1.5;
+  assert.equal(p.position(), 12.5);
+  assert.equal(p.rate(), 1.5);
+});

@@ -59,5 +59,9 @@ def delete(url, **kw):
     return request("DELETE", url, **kw)
 
 
+def patch(url, **kw):
+    return request("PATCH", url, **kw)
+
+
 def as_json(body: bytes):
     return json.loads(body.decode("utf-8"))

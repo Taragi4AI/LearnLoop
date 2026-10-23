@@ -6,6 +6,10 @@
   <title>LearnLoop · Lecture Player</title>
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="learn.css" />
+  <!-- Resolve onnxruntime-web to the locally-vendored build for wake-word detection. -->
+  <script type="importmap">
+  { "imports": { "onnxruntime-web": "/wakeword/ort/ort.min.mjs" } }
+  </script>
 </head>
 <body class="learn-body">
   <header class="topbar">
@@ -13,7 +17,7 @@
       <span class="logo">◈</span>
       <div>
         <h1>LearnLoop</h1>
-        <p class="tagline">Playable lecture foundation (G1)</p>
+        <p class="tagline">Watch a lecture, auto-transcribe it, search and jump to any moment</p>
       </div>
     </div>
     <div class="key-status" id="keyStatus" title="Server-side key status">
@@ -26,8 +30,9 @@
     <!-- Lecture selection -->
     <section class="lecture-picker" id="picker">
       <h2>Open a lecture</h2>
-      <p class="hint">Choose a local video file to start watching. Playback begins as soon as
-        the browser can play it — no upload, transcription, or AI processing required.</p>
+      <p class="hint">Drop a local video (MP4/WebM) or pick one — playback starts immediately
+        while LearnLoop transcribes it locally in the background. Then search the transcript
+        and click any line to jump. Pick a recent lecture below to reopen it.</p>
 
       <div class="drop-zone" id="dropZone" tabindex="0" role="button"
            aria-label="Choose a lecture video or drop one here">
@@ -39,6 +44,13 @@
         </div>
       </div>
       <div class="picker-msg" id="pickerMsg" role="status" aria-live="polite"></div>
+
+      <div class="recent" id="recentWrap">
+        <div class="recent-head">Recent lectures</div>
+        <div class="recent-list" id="recentList">
+          <span class="muted">None yet.</span>
+        </div>
+      </div>
     </section>
 
     <!-- Player -->
@@ -81,6 +93,74 @@
       </div>
 
       <div class="player-msg err" id="playerError" role="alert" aria-live="assertive"></div>
+
+      <!-- Looper voice assistant (G3.1: local wake-word detection only) -->
+      <section class="looper-panel" id="looperPanel">
+        <div class="looper-head">
+          <strong>🎙️ Looper (voice)</strong>
+          <span class="pill" id="wwState" data-s="off">Wake word off</span>
+        </div>
+        <p class="hint" id="wwHint">
+          Enable to listen locally for <code>"Hey Jarvis"</code>. Audio is processed in your
+          browser and is <strong>not</strong> streamed anywhere (Higgs Realtime is a later step).
+        </p>
+        <div class="looper-row">
+          <button class="ctl small" id="wwToggle" type="button">Enable wake word</button>
+          <button class="ctl small" id="wwManual" type="button" title="Activate without the wake word">Activate (manual)</button>
+          <div class="ww-meter" aria-hidden="true"><div class="ww-meter-fill" id="wwMeter"></div></div>
+          <span class="ww-score" id="wwScore" title="live wake-word model score">score —</span>
+        </div>
+        <!-- Live conversation (G3.2) -->
+        <div class="looper-convo hidden" id="looperConvo">
+          <div class="convo-head">
+            <span class="pill" id="rtState" data-s="idle">idle</span>
+            <button class="ctl small danger" id="rtStop" type="button">Stop talking</button>
+            <button class="ctl small" id="rtExport" type="button"
+                    title="Download a timestamped JSON log of this conversation for debugging">Export chat</button>
+          </div>
+          <div class="convo-log" id="rtLog" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <!-- Transcript panel (progressive): auto-starts on load; search + jump + highlight -->
+      <section class="transcript-panel" id="transcriptPanel">
+        <div class="tp-head">
+          <strong>Transcript</strong>
+          <span class="muted" id="tpStatus">Load a lecture to begin.</span>
+        </div>
+
+        <div class="tp-barwrap hidden" id="tpBarWrap" aria-hidden="true">
+          <div class="tp-bar" id="tpBar" data-stage="queued"></div>
+        </div>
+
+        <div class="tp-row">
+          <input type="text" id="tpQuery" placeholder="Search a spoken phrase…" disabled />
+          <button class="ctl small" id="tpSearch" type="button" disabled>Search</button>
+        </div>
+        <div class="tp-nav" id="tpNav">
+          <button class="ctl small" id="tpPrev" type="button" disabled
+                  aria-label="Previous occurrence">‹ Prev</button>
+          <button class="ctl small" id="tpNext" type="button" disabled
+                  aria-label="Next occurrence">Next ›</button>
+          <button class="ctl small" id="tpAuto" type="button" disabled
+                  aria-label="Auto-scan occurrences">▶ Auto-scan</button>
+          <span class="tp-counter" id="tpCounter" aria-live="polite"></span>
+        </div>
+        <div class="tp-results" id="tpResults" aria-live="polite"></div>
+
+        <div class="tp-list" id="tpList" aria-live="polite"></div>
+      </section>
+
+      <!-- Bookmarks (G5 "Remember") -->
+      <section class="bm-panel" id="bmPanel">
+        <div class="bm-head"><strong>🔖 Saved concepts</strong></div>
+        <div class="bm-row">
+          <input type="text" id="bmTitle" placeholder="Name this moment (e.g. gradient descent)" />
+          <button class="ctl small" id="bmSave" type="button">Save current moment</button>
+        </div>
+        <div class="bm-msg" id="bmMsg" aria-live="polite"></div>
+        <div class="bm-list" id="bmList" aria-live="polite"></div>
+      </section>
     </section>
   </main>
 
