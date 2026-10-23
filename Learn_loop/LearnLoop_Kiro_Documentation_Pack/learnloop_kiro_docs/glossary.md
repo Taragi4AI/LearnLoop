@@ -1,0 +1,24 @@
+# LearnLoop — Glossary
+
+- **Lecture:** A video or other supported learning recording opened in LearnLoop.
+- **Video timeline:** The original media's time axis, measured in seconds. All transcript segments and bookmarks must map to this timeline.
+- **Lecture awareness:** The background process that builds transcript and topic context while a lecture plays.
+- **Transcript segment:** A text passage associated with a video ID and start/end times.
+- **Timing quality:** The precision level of a segment's timing, such as word, sentence, segment, approximate, or unknown.
+- **Recent context window:** The latest available timestamped transcript passages, initially targeting approximately 30–90 seconds of lecture content.
+- **Lecture knowledge:** The growing searchable transcript and related compact topic summaries for the current lecture.
+- **Student learning state:** User-controlled learning preferences, saved notes, bookmarks, unresolved questions, and concise session history. It is not an inferred sensitive profile.
+- **Passive mode:** The lecture can play and the app updates lecture context; the local detector listens for “Looper”; the user's microphone is not streamed to the server.
+- **Wake word:** The configured phrase “Looper” that activates the assistant.
+- **Active assistant mode:** The mode after wake-word activation, in which user microphone audio may be streamed to Higgs Realtime and the assistant can respond or request tools.
+- **Tool:** A typed, validated application operation requested by the agent, such as searching a transcript, seeking the video, or creating a bookmark.
+- **Tool result:** A structured success or failure response returned by the application after the requested operation is actually executed.
+- **Grounded answer:** An answer whose lecture-specific claims are supported by actual transcript segments and source timestamps.
+- **AI-added context:** Supplemental explanation, analogy, or example that was not necessarily stated by the lecturer and is labelled as such.
+- **Bookmark / saved concept:** A durable learning object linked to a lecture timestamp and, when available, transcript segments, a student note, and an optional AI explanation.
+- **Transcript lag:** The difference between the current video playback position and the latest lecture time that has been transcribed and made available.
+- **Progressive transcription:** Producing and indexing transcript segments incrementally while playback may continue, rather than waiting for the whole lecture.
+- **Context builder:** The service that combines recent transcript, retrieved historical passages, current video position, and relevant student state for a user request.
+- **Realtime session:** A live Higgs Realtime interaction session used for active conversation. Exact lifecycle and protocol behavior must follow verified API documentation.
+- **Wake-word detector:** Local component that detects “Looper” without sending the passive microphone stream to the server.
+- **Playback brightness:** A visual brightness filter applied to the video element; it does not change the physical display's brightness.
