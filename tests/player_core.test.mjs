@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  validateFile, formatTime, clampSeek, normalizeRate,
+  validateFile, formatTime, clampSeek, normalizeRate, settledMediaTime,
   createPlayerController, STATE, ALLOWED_RATES,
 } from '../public/player-core.js';
 
@@ -57,6 +57,26 @@ test('normalizeRate snaps to allowed rates', () => {
   assert.equal(normalizeRate(3), 2);
   assert.equal(normalizeRate('1.5'), 1.5);
   assert.equal(normalizeRate('bad'), 1);
+});
+
+test('settledMediaTime returns the current media position when no seek is active', async () => {
+  const media = { currentTime: 42.5, seeking: false };
+  assert.equal(await settledMediaTime(media), 42.5);
+});
+
+test('settledMediaTime waits for a native seek before reading the position', async () => {
+  const listeners = new Map();
+  const media = {
+    currentTime: 0,
+    seeking: true,
+    addEventListener(name, fn) { listeners.set(name, fn); },
+    removeEventListener(name) { listeners.delete(name); },
+  };
+  const captured = settledMediaTime(media, 1000);
+  media.currentTime = 37.25;
+  media.seeking = false;
+  listeners.get('seeked')();
+  assert.equal(await captured, 37.25);
 });
 
 // ---- Controller behavior with a fake media element ----

@@ -7,7 +7,7 @@
 
 import { el } from './shared.js';
 
-const STOP_WORDS = new Set(['the', 'and', 'for', 'that', 'this', 'with', 'what', 'when', 'where', 'which', 'from', 'into', 'about', 'your', 'does', 'have', 'will', 'would', 'could', 'should', 'please', 'explain', 'lecture']);
+const STOP_WORDS = new Set(['the', 'and', 'for', 'that', 'this', 'with', 'what', 'when', 'where', 'which', 'from', 'into', 'about', 'your', 'does', 'have', 'will', 'would', 'could', 'should', 'please', 'explain', 'lecture', 'video', 'help', 'understand', 'tell', 'going', 'gonna', 'today', 'yeah', 'okay', 'really']);
 
 function cleanText(value, max = 260) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -26,10 +26,40 @@ function shortTopic(value, fallback = 'lecture concept') {
 function isSubstantiveQuestion(question) {
   const text = cleanText(question, 600);
   if (text.length < 8 || words(text).length < 2) return false;
-  // Voice-control, wake-word, and bookmark requests are not learning
-  // questions—even if the transcription service adds a question mark.
-  if (/\b(?:hey\s+jarvis|are\s+you\s+listening|stop(?:\s+it)?|start\s+listening|bookmark|set\s+up|save\s+(?:this|a)|pause|play|rewind|forward|mute|volume|speed|timestamp)\b/i.test(text)) return false;
+  // Voice-control, navigation, wake-word, and bookmark requests are not
+  // learning questions—even if the transcription service adds a question mark.
+  if (/\b(?:hey\s+jarvis|are\s+you\s+listening|stop(?:\s+it)?|start\s+listening|bookmark|set\s+up|save\s+(?:this|a)|pause|play|rewind|forward|mute|volume|speed|timestamp|skip|jump|seek|go\s+to|middle\s+of\s+(?:the\s+)?video|code\s+break)\b/i.test(text)) return false;
+  // General conversation and course-navigation prompts do not belong in a
+  // study artefact. They may occur naturally in a voice conversation.
+  if (/\b(?:what\s+are\s+you\s+(?:going\s+to|gonna)\s+teach|what(?:'s|\s+is)\s+happening|is\s+that\s+okay|thanks?|thank\s+you|got\s+it)\b/i.test(text)) return false;
   return /\b(what|why|how|when|where|which|who|can you|could you|clarify|explain|re-?explain|simpl(?:ify|er)|break.*down|help me understand|meaning|matlab|kya)\b/i.test(text);
+}
+
+function evidenceMatch(text, citations = []) {
+  const terms = new Set(words(text));
+  let best = null;
+  let score = 0;
+  for (const citation of citations) {
+    const matches = words(citation.text).filter((word) => terms.has(word)).length;
+    if (matches > score) { score = matches; best = citation; }
+  }
+  return { citation: best, score, termCount: terms.size };
+}
+
+/**
+ * Admission gate for question-derived study content. A valid learner question
+ * must be an actual learning inquiry and share a meaningful term with the
+ * active lecture evidence. This keeps player commands and small-talk out of
+ * FAQs, quizzes, and the review list.
+ */
+export function isStudyQuestion(question, citations = []) {
+  if (!isSubstantiveQuestion(question)) return false;
+  const match = evidenceMatch(question, citations);
+  return match.score >= 2 || (match.score === 1 && match.termCount === 1);
+}
+
+function questionKey(question) {
+  return words(question).join(' ');
 }
 
 function isUsableSegment(segment) {
@@ -60,14 +90,7 @@ export function createSessionCsp({ container: initialContainer = null, seek, for
 
   function evidenceForText(text) {
     if (!state) return null;
-    const terms = new Set(words(text));
-    let best = null;
-    let score = 0;
-    for (const citation of state.citations) {
-      const matches = words(citation.text).filter((word) => terms.has(word)).length;
-      if (matches > score) { score = matches; best = citation; }
-    }
-    return score ? best : null;
+    return evidenceMatch(text, state.citations).citation;
   }
 
   function addReview(item) {
@@ -84,14 +107,9 @@ export function createSessionCsp({ container: initialContainer = null, seek, for
   }
 
   function buildGeneralFaqs() {
-    const count = Math.min(3, state.citations.length);
-    const stride = Math.max(1, Math.floor(state.citations.length / Math.max(count, 1)));
-    return state.citations.filter((_citation, index) => index % stride === 0).slice(0, count).map((citation, index) => ({
-      id: `general:${citation.id}`,
-      question: `What does the lecture say about ${shortTopic(citation.text, 'this concept')}?`,
-      answer: `The lecture explains: ${citation.text}`,
-      source: 'Lecture evidence', citations: [citation], index,
-    }));
+    // Do not turn arbitrary transcript fragments into fake questions. This
+    // section is intentionally populated by eligible learner questions only.
+    return [];
   }
 
   function buildQuestionFaq(question) {
@@ -111,7 +129,10 @@ export function createSessionCsp({ container: initialContainer = null, seek, for
       .filter((seed) => seed.citation);
     // Learner questions drive the package whenever possible. The fallback only
     // covers a learner who has not asked a question yet.
-    const seeds = questionSeeds.length ? questionSeeds : citations.slice(0, 3).map((citation) => ({ citation, question: null }));
+    // A raw transcript sentence is evidence, not a learner question. Generate
+    // a quiz only from an eligible learner inquiry instead of guessing a topic
+    // from a clipped sentence.
+    const seeds = questionSeeds;
     const questions = [];
     for (const seed of seeds) {
       if (questions.length >= 3) break;
@@ -250,7 +271,7 @@ export function createSessionCsp({ container: initialContainer = null, seek, for
         el('p', { className: 'csp-source-label', textContent: faq.source }), evidenceLine(faq.citations)); faqs.append(item);
     });
     faqs.append(el('h4', { textContent: 'From your questions' }));
-    if (!state.questions.length) faqs.append(el('p', { className: 'muted', textContent: 'Ask a substantive question in Jarvis to add it here for this session.' }));
+    if (!state.questions.length) faqs.append(el('p', { className: 'muted', textContent: 'Ask Jarvis a question about a lecture concept to add it here for this session.' }));
     const groundedQuestions = state.questions.map((question) => ({ question, faq: buildQuestionFaq(question) }))
       .filter(({ faq }) => faq);
     if (!groundedQuestions.length) faqs.append(el('p', { className: 'muted', textContent: 'No learner questions matched validated lecture evidence yet.' }));
@@ -273,7 +294,7 @@ export function createSessionCsp({ container: initialContainer = null, seek, for
     const quiz = el('section', { className: 'csp-section' });
     const quizItems = state.quiz || [];
     const score = quizItems.reduce((sum, question) => sum + (question.attempts.at(-1)?.correct ? 1 : 0), 0);
-    quiz.append(el('h3', { textContent: 'Quiz' }), el('p', { className: 'muted', textContent: `Current score: ${score}/${quizItems.length}. Attempts stay in this session only.` }));
+    quiz.append(el('h3', { textContent: 'Quiz' }), el('p', { className: 'muted', textContent: quizItems.length ? `Current score: ${score}/${quizItems.length}. Attempts stay in this session only.` : 'Ask a lecture-concept question to create a grounded practice question.' }));
     if (state.failures.quiz) quiz.append(failureBlock('quiz', 'quiz'));
     quizItems.forEach((question) => quiz.append(renderQuizQuestion(question)));
     panel.append(quiz);
@@ -331,15 +352,21 @@ export function createSessionCsp({ container: initialContainer = null, seek, for
     activate(nextLectureId, segments) {
       if (!nextLectureId || nextLectureId !== lectureId || state) return;
       const citations = (segments || []).filter(isUsableSegment).map(citationFor);
-      state = { lectureId, citations, questions: queuedQuestions.filter((question) => isSubstantiveQuestion(question.text)), review: [], generalFaqs: [], quiz: [], bookmarks: [], failures: {} };
+      state = { lectureId, citations, questions: queuedQuestions.filter((question) => isStudyQuestion(question.text, citations)), review: [], generalFaqs: [], quiz: [], bookmarks: [], failures: {} };
       generateSection('faqs'); generateSection('quiz');
       state.questions.forEach(syncQuestionReview);
       render();
     },
     recordQuestion(text) {
       const question = { id: `q:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`, text: cleanText(text, 600) };
-      if (!isSubstantiveQuestion(question.text) || !lectureId) return;
+      if (!lectureId) return;
+      // Before activation only basic filtering is possible; evidence matching
+      // is applied when the transcript becomes available.
+      if (!state && !isSubstantiveQuestion(question.text)) return;
       if (!state) { queuedQuestions.push(question); return; }
+      if (!isStudyQuestion(question.text, state.citations)) return;
+      const key = questionKey(question.text);
+      if (state.questions.some((existing) => questionKey(existing.text) === key)) return;
       state.questions.push(question); syncQuestionReview(question); generateSection('quiz'); render();
     },
     setBookmarks(bookmarks) {

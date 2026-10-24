@@ -10,12 +10,30 @@ import { initRealtime } from './realtime.js';
 // ---------------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------------
-$$('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    $$('.tab').forEach((t) => t.classList.remove('active'));
-    $$('.panel').forEach((p) => p.classList.remove('active'));
-    tab.classList.add('active');
-    $(`#panel-${tab.dataset.tab}`).classList.add('active');
+const tabs = $$('.tab');
+
+function selectTab(tab, moveFocus = false) {
+  tabs.forEach((item) => {
+    const selected = item === tab;
+    item.classList.toggle('active', selected);
+    item.setAttribute('aria-selected', selected ? 'true' : 'false');
+    item.tabIndex = selected ? 0 : -1;
+  });
+  $$('.panel').forEach((panel) => panel.classList.toggle('active', panel.id === `panel-${tab.dataset.tab}`));
+  if (moveFocus) tab.focus();
+}
+
+tabs.forEach((tab, index) => {
+  tab.addEventListener('click', () => selectTab(tab));
+  tab.addEventListener('keydown', (event) => {
+    let next = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % tabs.length;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index - 1 + tabs.length) % tabs.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = tabs.length - 1;
+    if (next == null) return;
+    event.preventDefault();
+    selectTab(tabs[next], true);
   });
 });
 

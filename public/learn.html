@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LearnLoop · Lecture Player</title>
+  <link rel="icon" type="image/png" href="/learnloop-icon.png" />
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="learn.css" />
   <!-- Resolve onnxruntime-web to the locally-vendored build for wake-word detection. -->
@@ -14,9 +15,9 @@
 <body class="learn-body">
   <header class="topbar">
     <div class="brand">
-      <span class="logo">◈</span>
+      <img class="brand-lockup" src="/learnloop-logo-horizontal.png" alt="LearnLoop" />
       <div>
-        <h1>LearnLoop</h1>
+        <h1 class="sr-only">LearnLoop</h1>
         <p class="tagline">Watch a lecture, auto-transcribe it, search and jump to any moment</p>
       </div>
     </div>
@@ -31,7 +32,10 @@
     <section class="lecture-picker" id="picker">
       <div class="hero">
         <span class="hero-eyebrow">Learning companion</span>
-        <h2 class="hero-title">Turn any lecture into a conversation</h2>
+        <h2 class="hero-title" id="heroTitle" aria-label="Turn any lecture into a conversation.">
+          <span class="hero-type-line" data-full-text="Turn any lecture into" aria-hidden="true"><span class="hero-type-text">Turn any lecture into</span></span>
+          <span class="hero-type-line hero-type-accent" data-full-text="a conversation." aria-hidden="true"><span class="hero-type-text">a conversation.</span></span>
+        </h2>
         <p class="hero-sub">Drop in a video and LearnLoop transcribes it locally, lets you search and
           jump to any moment, and gives you <strong>Jarvis</strong> — a voice tutor grounded in what
           the lecturer actually said.</p>

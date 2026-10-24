@@ -4,14 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Boson AI · Higgs API Playground</title>
+  <link rel="icon" type="image/png" href="/learnloop-icon.png" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">◈</span>
+      <img class="brand-lockup" src="/learnloop-logo-horizontal.png" alt="LearnLoop" />
       <div>
-        <h1>Higgs API Playground</h1>
+        <h1 class="sr-only">Higgs API Playground</h1>
         <p class="tagline">Exercise every Boson AI API — TTS 3, Voices, Avatar, Realtime</p>
       </div>
     </div>
@@ -21,17 +22,17 @@
     </div>
   </header>
 
-  <nav class="tabs" role="tablist">
-    <button class="tab active" data-tab="tts" role="tab">🗣️ TTS 3</button>
-    <button class="tab" data-tab="voices" role="tab">🎙️ Voices</button>
-    <button class="tab" data-tab="avatar" role="tab">🎬 Avatar</button>
-    <button class="tab" data-tab="realtime" role="tab">⚡ Realtime</button>
-    <button class="tab" data-tab="about" role="tab">ℹ️ About</button>
+  <nav class="tabs" role="tablist" aria-label="Playground sections">
+    <button class="tab active" data-tab="tts" id="tab-tts" type="button" role="tab" aria-selected="true" aria-controls="panel-tts">🗣️ TTS 3</button>
+    <button class="tab" data-tab="voices" id="tab-voices" type="button" role="tab" aria-selected="false" aria-controls="panel-voices" tabindex="-1">🎙️ Voices</button>
+    <button class="tab" data-tab="avatar" id="tab-avatar" type="button" role="tab" aria-selected="false" aria-controls="panel-avatar" tabindex="-1">🎬 Avatar</button>
+    <button class="tab" data-tab="realtime" id="tab-realtime" type="button" role="tab" aria-selected="false" aria-controls="panel-realtime" tabindex="-1">⚡ Realtime</button>
+    <button class="tab" data-tab="about" id="tab-about" type="button" role="tab" aria-selected="false" aria-controls="panel-about" tabindex="-1">ℹ️ About</button>
   </nav>
 
   <main>
     <!-- ================= TTS ================= -->
-    <section class="panel active" id="panel-tts">
+    <section class="panel active" id="panel-tts" role="tabpanel" aria-labelledby="tab-tts">
       <h2>Text to Speech <small>POST /v1/audio/speech</small></h2>
       <p class="hint">Generate expressive speech. Insert inline tags from the chips below to control emotion, style, prosody, and sound effects.</p>
 
@@ -86,7 +87,7 @@
     </section>
 
     <!-- ================= VOICES ================= -->
-    <section class="panel" id="panel-voices">
+    <section class="panel" id="panel-voices" role="tabpanel" aria-labelledby="tab-voices">
       <h2>Custom Voices <small>/v1/audio/voices</small></h2>
       <p class="hint">Register a reusable voice from reference audio, then reference its ID in the TTS tab. IDs are deterministic per (key, audio).</p>
 
@@ -116,7 +117,7 @@
     </section>
 
     <!-- ================= AVATAR ================= -->
-    <section class="panel" id="panel-avatar">
+    <section class="panel" id="panel-avatar" role="tabpanel" aria-labelledby="tab-avatar">
       <h2>Avatar Video <small>/v1/videos</small></h2>
       <p class="hint">Turn a still image into a talking-head video. Drive it with text (synthesized by TTS) or with your own audio. The job is async — we poll until it's done.</p>
 
@@ -174,7 +175,7 @@
     </section>
 
     <!-- ================= REALTIME ================= -->
-    <section class="panel" id="panel-realtime">
+    <section class="panel" id="panel-realtime" role="tabpanel" aria-labelledby="tab-realtime">
       <h2>Realtime Voice <small>WebSocket · /v1/realtime</small></h2>
       <p class="hint">Full-duplex voice session. The browser mints a short-lived client secret from the server, opens the WebSocket, streams your mic, and plays the model's audio reply.</p>
 
@@ -220,7 +221,7 @@
     </section>
 
     <!-- ================= ABOUT ================= -->
-    <section class="panel" id="panel-about">
+    <section class="panel" id="panel-about" role="tabpanel" aria-labelledby="tab-about">
       <h2>About this playground</h2>
       <p>A single app that exercises every Boson AI (Higgs) developer API. The browser never holds your API key — all calls go through the local Express proxy in <code>server.js</code>, which attaches the <code>Authorization: Bearer</code> header. For Realtime, the server mints a short-lived client secret and the browser connects directly over WebSocket.</p>
       <table class="about-table">

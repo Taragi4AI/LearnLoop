@@ -9,7 +9,11 @@
 // All media logic lives in player-core.js (unit-tested). This file only binds
 // that controller to real DOM + <video> events.
 
-import { createPlayerController, validateFile, formatTime, STATE } from './player-core.js';
+// Keep the module revision in sync with learn.js during local development.
+// Without it, a normal Chrome profile can combine a fresh learn.js with an
+// older cached player-core.js after an export changes, which stops the entire
+// page from initializing. Incognito works only because its cache starts empty.
+import { createPlayerController, validateFile, formatTime, settledMediaTime, STATE } from './player-core.js?v=bookmark-timestamp-1';
 import { el } from './shared.js';
 import { createSearchNav } from './search-nav.js';
 import { createWakeWordListener } from './wakeword.js';
@@ -56,6 +60,68 @@ const els = {
   fwd10: $('#fwd10'),
   playerError: $('#playerError'),
 };
+
+// Homepage headline: reserve both final lines before typing so surrounding
+// content never shifts. The static markup remains available if JS is absent.
+function typeHeroTitle() {
+  const title = $('#heroTitle');
+  const lines = [...title?.querySelectorAll('.hero-type-line') || []];
+  if (!lines.length) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  lines.forEach((line) => { line.querySelector('.hero-type-text').textContent = ''; });
+  const cursor = document.createElement('span');
+  cursor.className = 'hero-type-cursor';
+  cursor.setAttribute('aria-hidden', 'true');
+  const speed = 65;
+  const pauseBetweenLines = 320;
+  const wait = (duration) => new Promise((resolve) => window.setTimeout(resolve, duration));
+
+  const typeLine = (line, index = 0) => new Promise((resolve) => {
+    const target = line.querySelector('.hero-type-text');
+    const fullText = line.dataset.fullText || '';
+    target.textContent = '';
+    target.append(cursor);
+    const timer = window.setInterval(() => {
+      target.insertBefore(document.createTextNode(fullText[index]), cursor);
+      index += 1;
+      if (index >= fullText.length) {
+        window.clearInterval(timer);
+        resolve();
+      }
+    }, speed);
+  });
+
+  const eraseLine = (line) => new Promise((resolve) => {
+    const target = line.querySelector('.hero-type-text');
+    let remaining = target.textContent;
+    target.textContent = remaining;
+    target.append(cursor);
+    const timer = window.setInterval(() => {
+      remaining = remaining.slice(0, -1);
+      target.firstChild.textContent = remaining;
+      if (!remaining) {
+        window.clearInterval(timer);
+        resolve();
+      }
+    }, 35);
+  });
+
+  (async () => {
+    while (true) {
+      await typeLine(lines[0]);
+      await wait(pauseBetweenLines);
+      await typeLine(lines[1]);
+      await wait(1600);
+      await eraseLine(lines[1]);
+      await wait(pauseBetweenLines);
+      await eraseLine(lines[0]);
+      await wait(500);
+    }
+  })();
+}
+
+typeHeroTitle();
 
 const player = createPlayerController(els.video);
 let currentObjectUrl = null;
@@ -805,7 +871,10 @@ async function executeTool(name, args) {
     }
     case 'prepare_bookmark': {
       if (!currentVideoId) return { ok: false, error: 'No lecture loaded.' };
-      const t = Number.isFinite(args.timestamp_seconds) ? args.timestamp_seconds : (els.video.currentTime || 0);
+      // If this follows a transcript/search seek, wait for the native media
+      // seek to land before capturing a fallback timestamp. Without this, a
+      // bookmark could incorrectly inherit the prior moment (commonly 0:00).
+      const t = Number.isFinite(args.timestamp_seconds) ? args.timestamp_seconds : await settledMediaTime(els.video);
       const dur = _dur();
       if (t < 0 || (dur != null && t > dur + 0.5)) return { ok: false, error: 'Timestamp out of range.' };
       const title = String(args.title || '').trim();
@@ -1818,11 +1887,16 @@ function nearestExcerpt(t) {
 
 async function saveBookmark() {
   if (!currentVideoId) { bm.msg.textContent = 'Load a lecture first.'; bm.msg.className = 'bm-msg err'; return; }
-  const t = els.video.currentTime || 0;
-  const title = (bm.title.value || '').trim() || `Moment at ${formatTime(t)}`;
   bm.save.disabled = true; bm.msg.textContent = 'Saving…'; bm.msg.className = 'bm-msg';
   try {
-    const res = await fetch(`/api/lectures/${currentVideoId}/bookmarks`, {
+    const lectureId = currentVideoId;
+    // `currentTime` is stale until the browser's asynchronous seek completes.
+    // Capture only after it has settled so manual Save matches the moment the
+    // learner just chose from the transcript or search results.
+    const t = await settledMediaTime(els.video);
+    if (lectureId !== currentVideoId) throw new Error('Lecture changed before the bookmark could be saved.');
+    const title = (bm.title.value || '').trim() || `Moment at ${formatTime(t)}`;
+    const res = await fetch(`/api/lectures/${lectureId}/bookmarks`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ timestamp_seconds: t, title, transcript_excerpt: nearestExcerpt(t) }),
     });

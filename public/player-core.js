@@ -65,6 +65,34 @@ export function normalizeRate(rate) {
 }
 
 /**
+ * Return the media's real playback position after an in-flight native seek
+ * settles. A seek is asynchronous in browsers, so reading `currentTime`
+ * immediately after choosing a transcript result can return the old moment
+ * (often 0:00). The timeout keeps UI actions recoverable if a browser never
+ * emits `seeked`; its fallback is still the real current media position.
+ */
+export function settledMediaTime(media, timeoutMs = 1500) {
+  const read = () => {
+    const time = Number(media?.currentTime);
+    return Number.isFinite(time) && time >= 0 ? time : 0;
+  };
+  if (!media?.seeking || typeof media.addEventListener !== 'function') return Promise.resolve(read());
+
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      media.removeEventListener?.('seeked', finish);
+      resolve(read());
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    media.addEventListener('seeked', finish, { once: true });
+  });
+}
+
+/**
  * Create a controller around a minimal "media" port so it is testable without
  * a browser. `media` must expose: currentTime, duration, playbackRate,
  * paused (getter), play(), pause(). In the browser this is the <video> element.

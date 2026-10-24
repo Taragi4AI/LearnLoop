@@ -241,6 +241,14 @@
   padding: 4px 12px; border-radius: 999px; margin-bottom: 14px;
 }
 .hero-title { font-size: 30px; line-height: 1.2; margin: 0 0 10px; color: var(--text); font-weight: 700; }
+.hero-type-line { display: block; position: relative; line-height: 1.2; }
+.hero-type-line::after { content: attr(data-full-text); visibility: hidden; white-space: nowrap; }
+.hero-type-text { position: absolute; inset: 0; white-space: nowrap; }
+.hero-type-accent .hero-type-text { color: var(--accent); }
+.hero-type-cursor { display: inline-block; width: 2px; height: .82em; margin-left: .08em; vertical-align: -.05em; background: currentColor; animation: hero-cursor 700ms step-end infinite; }
+.hero-type-cursor.done { display: none; }
+@keyframes hero-cursor { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .hero-type-cursor { animation: none; display: none; } }
 .hero-sub { color: var(--muted); font-size: 15px; line-height: 1.6; margin: 0; }
 .hero-sub strong { color: var(--accent); }
 
@@ -300,9 +308,11 @@
 .recent-grid .muted { grid-column: 1 / -1; }
 /* Cards reuse .recent-item (styled below) but lay out as blocks in the grid. */
 .recent-grid .recent-item {
-  flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px;
+  flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px; min-width: 0;
 }
-.recent-grid .recent-item .recent-title { font-weight: 600; white-space: normal; }
+.recent-grid .recent-item .recent-title {
+  min-width: 0; font-weight: 600; white-space: normal; overflow-wrap: anywhere;
+}
 .recent-grid .recent-item .recent-stage {
   align-self: flex-start; font-size: 11px; text-transform: capitalize;
   background: var(--surface-2); color: var(--muted);
@@ -847,4 +857,177 @@
   .cue-wave.on i, .cue-dots.on i { animation: none !important; height: 8px !important; opacity: 0.8 !important; }
   .cue-spin { animation: none !important; }
   .cue-card-strip { animation: none !important; }
+}
+
+/* =====================================================================
+   Refined LearnLoop product layer
+   A quieter, more structured surface for study work.  These overrides use
+   existing classes and state attributes exclusively, preserving the player,
+   chat, transcript, package, and walkthrough behavior implemented in JS.  */
+.learn-body {
+  --bg: #f5f7fb;
+  --panel: #ffffff;
+  --panel-2: #eef3f9;
+  --surface-2: #eef3f9;
+  --border: #d9e2ef;
+  --text: #1c293b;
+  --muted: #627188;
+  --accent: #2e5ea7;
+  --accent-2: #218d82;
+  --accent-soft: #e6effd;
+  --looper-soft: #f3f0fb;
+  --good: #167458;
+  --bad: #b5474f;
+  --warn: #a66a14;
+  --radius: 16px;
+  background:
+    radial-gradient(900px 450px at 0 -12%, rgba(88, 142, 219, .12), transparent 65%),
+    radial-gradient(860px 500px at 100% 0%, rgba(33, 141, 130, .08), transparent 65%),
+    var(--bg);
+}
+.learn-body .topbar {
+  background: rgba(255,255,255,.87);
+  border-bottom-color: rgba(217, 226, 239, .88);
+  box-shadow: 0 1px 0 rgba(17, 35, 64, .03);
+}
+.learn-body .topbar h1 { font-weight: 760; }
+.learn-body .tagline { color: var(--muted); }
+.learn-body .key-status { background: #fff; color: var(--muted); }
+.learn-body .key-status .dot { box-shadow: none; }
+.learn-body .learn-main { padding-top: clamp(18px, 2.8vw, 32px); }
+
+/* The landing view is intentionally breathable, while the active workspace
+   becomes a clear application canvas. */
+.learn-body .hero { max-width: 710px; }
+.learn-body .hero-eyebrow {
+  color: #285891; background: #e9f1fe; border-color: #ceddf4;
+  box-shadow: 0 1px 1px rgba(27, 66, 117, .04);
+}
+.learn-body .hero-title { font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -.045em; }
+.learn-body .hero-sub { font-size: clamp(.95rem, 1.6vw, 1.06rem); }
+.learn-body .drop-zone {
+  border-color: #bfcee2; border-radius: 20px;
+  box-shadow: 0 12px 32px rgba(31, 64, 111, .06);
+}
+.learn-body .drop-zone:hover, .learn-body .drop-zone:focus-visible {
+  background: #fbfdff; border-color: var(--accent);
+  box-shadow: 0 16px 36px rgba(31, 64, 111, .12);
+}
+.learn-body .drop-zone.drag { background: #eaf2ff; border-color: var(--accent); }
+.learn-body .drop-icon { background: #e9f1fe; box-shadow: inset 0 0 0 1px rgba(46,94,167,.08); }
+.learn-body .hero-feats li { box-shadow: 0 2px 7px rgba(23, 47, 82, .035); }
+.learn-body .recent-grid .recent-item, .learn-body .recent-item {
+  border-radius: 12px; border-color: var(--border); background: rgba(255,255,255,.82);
+}
+.learn-body .recent-item:hover { background: #fff; box-shadow: 0 7px 16px rgba(23,47,82,.07); }
+
+/* Workspace surfaces.  A subtle cool tint distinguishes the persistent rails
+   from the primary lecture and transcript reading column. */
+.learn-body .workspace { gap: 18px; }
+.learn-body .ws-left, .learn-body .ws-right {
+  border-color: #d7e1ef; box-shadow: 0 12px 30px rgba(24, 51, 88, .055);
+}
+.learn-body .ws-left { background: rgba(255,255,255,.93); }
+.learn-body .ws-right { background: #fbfcff; }
+.learn-body .rail-head { min-height: 52px; padding: 12px 15px; background: rgba(238,243,249,.52); }
+.learn-body .rail-head strong { letter-spacing: .01em; }
+.learn-body .rail-body { padding: 14px; }
+.learn-body .rail-toggle { background: #fff; box-shadow: 0 1px 2px rgba(24,51,88,.05); }
+.learn-body .rail-link { font-weight: 650; }
+.learn-body .ws-center { gap: 12px; }
+.learn-body .player-head { gap: 10px; min-height: 40px; }
+.learn-body .player-title { font-size: 1.02rem; letter-spacing: -.01em; }
+.learn-body #cspLink, .learn-body #closeBtn { white-space: nowrap; }
+.learn-body .video-shell { border: 1px solid #16243a; box-shadow: 0 16px 36px rgba(22, 38, 65, .16); }
+.learn-body .video-overlay { color: #e7effa; }
+
+/* Player controls retain their existing grouping; richer surfaces make the
+   control hierarchy quicker to scan without moving any element. */
+.learn-body .controls {
+  padding: 8px; gap: 8px; border: 1px solid var(--border); border-radius: 13px;
+  background: rgba(255,255,255,.9); box-shadow: 0 4px 12px rgba(23,47,82,.045);
+}
+.learn-body .ctl { border-radius: 9px; font-weight: 700; }
+.learn-body .ctl-group { min-height: 36px; padding-right: 8px; border-right: 1px solid var(--border); }
+.learn-body .ctl-group-right { padding-right: 0; border-right: 0; }
+.learn-body .ctl.small { padding: 8px 10px; }
+.learn-body .seek { min-width: 130px; }
+.learn-body .media-state { margin: 0 2px; font-weight: 650; }
+.learn-body .menu { border-radius: 13px; box-shadow: 0 16px 35px rgba(24,51,88,.16); }
+.learn-body .seg-btn { min-height: 33px; }
+.learn-body .seg-btn.sel, .learn-body .seg-btn[aria-checked="true"] { background: var(--accent); }
+
+/* Transcript and Study Package share the same reading-card cadence. */
+.learn-body .transcript-panel, .learn-body .csp-panel, .learn-body .bm-panel {
+  border-color: #d7e1ef; box-shadow: 0 8px 24px rgba(23,47,82,.045);
+}
+.learn-body .tp-head, .learn-body .csp-head { gap: 12px; }
+.learn-body .tp-row input[type="text"], .learn-body .bm-row input, .learn-body .csp-short-answer {
+  background: #fff; border-color: #cbd8e9;
+}
+.learn-body .tp-hit, .learn-body .tp-seg { border-radius: 9px; }
+.learn-body .tp-hit:hover, .learn-body .tp-seg:hover { background: #f2f6fc; }
+.learn-body .tp-seg.active { box-shadow: inset 3px 0 0 var(--accent); }
+.learn-body .tp-list { scrollbar-color: #b8c6da transparent; }
+.learn-body .csp-item { background: #f8fbff; border-color: #d9e4f1; }
+.learn-body .csp-item:hover { border-color: #b5c9e5; }
+.learn-body .csp-feedback.ok { color: #155c46; border: 1px solid #bde3d1; }
+.learn-body .csp-feedback.err, .learn-body .csp-failure { border: 1px solid #f0d0ca; }
+.learn-body .csp-source { border-radius: 4px; }
+
+/* Looper and its states stay distinct from lecture evidence while belonging to
+   the same palette.  Existing data-s / data-kind states remain the source of
+   truth for status colors. */
+.learn-body .ws-right .looper-activate { background: linear-gradient(180deg, #f4f8ff, #fbfcff); }
+.learn-body .looper-panel { background: transparent; }
+.learn-body .convo-head { padding-bottom: 7px; border-bottom: 1px solid #e2e9f3; }
+.learn-body .convo-row { border-radius: 12px; box-shadow: 0 1px 1px rgba(23,47,82,.035); }
+.learn-body .convo-row.you { background: #e6effd; border-color: #cbdcf5; }
+.learn-body .convo-row.looper { background: #f1effa; border-color: #ded9f0; }
+.learn-body .cue-card-strip { border-radius: 12px; box-shadow: 0 3px 10px rgba(23,47,82,.05); }
+.learn-body .bm-panel { background: rgba(255,255,255,.78); }
+.learn-body .bm-item { border-radius: 10px; }
+.learn-body .bm-open:hover { background: #eef4fc; }
+.learn-body .jump-latest { box-shadow: 0 5px 14px rgba(46,94,167,.25); }
+
+/* Calm Walkthrough is intentionally calm: the validated source trail is
+   visually prominent and the optional generation action remains secondary. */
+.learn-body .calm-walkthrough { border-color: #cbdcf3; border-radius: 12px; background: #f8fbff; }
+.learn-body .calm-walkthrough-head { font-weight: 700; }
+.learn-body .calm-diagram { border: 1px solid #e0e8f4; }
+.learn-body .calm-source { border-left-color: #7093c5; background: #fff; }
+.learn-body .calm-video { border-top-color: #cbdcf3; }
+.learn-body .walkthrough-dialog { border: 1px solid #d4e0ef; box-shadow: 0 28px 88px rgba(20,45,82,.28); }
+.learn-body .walkthrough-dialog::backdrop { background: rgba(17, 35, 64, .55); backdrop-filter: blur(3px); }
+
+/* Ensure compact widths remain task-friendly rather than merely smaller. */
+@media (max-width: 1200px) {
+  .learn-body .workspace { gap: 14px; }
+  .learn-body .ws-right { border-top: 3px solid #dce7f8; }
+}
+@media (max-width: 820px) {
+  .learn-body .learn-main { padding-inline: 12px; }
+  .learn-body .lecture-picker { padding-top: 10px; }
+  .learn-body .drop-zone { padding: 30px 16px; }
+  .learn-body .workspace { gap: 12px; }
+  .learn-body .controls { align-items: stretch; }
+  .learn-body .ctl-group { border-right: 0; padding-right: 0; flex-wrap: wrap; }
+  .learn-body .ctl-group-right { margin-left: 0; }
+  .learn-body .seek { order: 4; flex-basis: 100%; width: 100%; }
+  .learn-body .time { order: 5; }
+  .learn-body .player-head { align-items: flex-start; flex-wrap: wrap; }
+  .learn-body .player-title { flex: 1 1 100%; }
+  .learn-body .csp-head { flex-direction: column; }
+  .learn-body .bm-row { flex-wrap: wrap; }
+}
+@media (max-width: 460px) {
+  .learn-body .topbar { padding-inline: 14px; }
+  .learn-body .brand { gap: 8px; }
+  .learn-body .topbar .tagline { display: none; }
+  .learn-body .hero-title { font-size: 1.9rem; }
+  .learn-body .hero-feats { justify-content: flex-start; }
+  .learn-body .hero-feats li { width: 100%; }
+  .learn-body .ctl-group { width: 100%; }
+  .learn-body .volume { flex: 1; }
+  .learn-body .walkthrough-dialog { width: calc(100vw - 16px); }
 }

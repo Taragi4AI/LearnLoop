@@ -117,6 +117,21 @@ def _relay(status: int, content_type: str, body: bytes) -> Response:
 app = FastAPI(title="LearnLoop backend (Boson proxy)")
 
 
+@app.middleware("http")
+async def no_cache_frontend_modules(request: Request, call_next):
+    """Avoid mixing revisions of browser ES modules during local development.
+
+    LearnLoop is served as individual modules rather than a bundled asset. A
+    heuristic browser cache can otherwise pair a changed importing module with
+    an older imported module, causing an import/export error only in a normal
+    Chrome profile. API and media responses keep their existing cache policy.
+    """
+    response = await call_next(request)
+    if request.url.path.endswith((".html", ".js", ".css", ".map")):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Health / config check
 # ---------------------------------------------------------------------------
@@ -236,12 +251,18 @@ MAX_UPLOAD_BYTES = int(os.environ.get("LEARNLOOP_MAX_UPLOAD_BYTES", str(500 * 10
 
 def _run_progressive(video_id: str, path: str):
     """Background entry: progressive processing of an uploaded lecture."""
-    from app.pipeline import process_video_progressive
     from app.storage import Storage
+    storage = Storage()
     try:
-        process_video_progressive(video_id, path, storage=Storage())
-    except Exception:
-        pass  # status/error already recorded on the row by the pipeline
+        # Keep this import inside the guarded block. A missing local
+        # transcription dependency used to leave the row in "queued" forever
+        # before the pipeline had a chance to record a failure.
+        from app.pipeline import process_video_progressive
+        process_video_progressive(video_id, path, storage=storage)
+    except Exception as exc:
+        # The pipeline normally records its own error. This covers failures
+        # that happen before it can start, such as a missing local dependency.
+        storage.set_progress(video_id, stage="failed", status="failed", error=str(exc))
 
 
 @app.post("/api/lectures")
