@@ -105,6 +105,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   let state = 'idle';     // idle | connecting | live | speaking | error | closed
   let starting = false;
   let activeResponseId = null;   // id of the response currently streaming (for stale-guarding)
+  let responseInProgress = false; // model generation can finish before avatar playback does
 
   // Manual-turn client VAD state.
   let speaking = false;       // currently detecting speech
@@ -152,12 +153,15 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   }
 
   function interruptAgent() {
-    // The mic is already streaming. Cancel the current answer and flush audio
-    // queued in WebAudio so the learner can take the floor immediately.
+    // The avatar may still be speaking after the model finished generating.
+    // Clear its audio, but cancel the model only while a response is active.
     suppressCancelledOutput = true;
     playbackPending = false;
     clearTimeout(playbackTimer); playbackTimer = null;
-    send({ type: 'response.cancel' });
+    if (responseInProgress) {
+      responseInProgress = false;
+      send({ type: 'response.cancel' });
+    }
     stopPlayback();
     // clear_buffer drops queued sound; flush closes the current LiveKit data
     // stream so the next answer starts as a separate utterance.
@@ -302,6 +306,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         onUserPending && onUserPending();      // ensure a provisional user bubble exists
         setState('live', 'Thinking…'); break;
       case 'response.created':
+        responseInProgress = true;
         suppressCancelledOutput = false;
         activeResponseId = (msg.response && msg.response.id) || msg.response_id || activeResponseId;
         onResponseStart && onResponseStart(activeResponseId);
@@ -323,6 +328,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         if (msg.transcript) onUserText && onUserText(msg.transcript);
         break;
       case 'response.done': {
+        responseInProgress = false;
         if (suppressCancelledOutput) {
           awaitingAnswer = false;
           playbackPending = false;
@@ -378,6 +384,10 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         break;
       }
       case 'error':
+        // A cancel can race with response.done at Boson. Playout was already
+        // cleared locally, so this specific late acknowledgement is harmless.
+        if (msg.error?.type === 'invalid_request_error' &&
+            /no active response to cancel/i.test(msg.error?.message || '')) break;
         setState('error', (msg.error?.type || 'error') + ': ' + (msg.error?.message || 'Realtime error'));
         break;
     }
@@ -485,6 +495,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   }
 
   function stop() {
+    responseInProgress = false;
     playbackPending = false;
     clearTimeout(playbackTimer); playbackTimer = null;
     try { ws && ws.close(); } catch {}
