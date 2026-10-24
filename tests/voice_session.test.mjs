@@ -6,7 +6,8 @@ test('direct stop-listening phrases are application commands', () => {
   for (const phrase of [
     'stop listening', 'stop', 'stop talking', 'be quiet', 'go to sleep',
     'end the conversation', 'stop the session', 'Could you please stop?',
-    'Jarvis, please stop listening now', 'please, stop Jarvis',
+    'Jarvis, please stop listening now', 'Looper, stop listening now',
+    'please stop listening', 'please, stop Jarvis',
   ]) assert.equal(isStopListeningCommand(phrase), true, phrase);
 });
 

@@ -1,5 +1,6 @@
 import { createLooperSession } from './avatar-realtime.js';
 import { createTurnSequencer } from './turn-sequencer.js';
+import { isStopListeningCommand } from './voice-session.js';
 
 const $ = (s) => document.querySelector(s);
 const els = {
@@ -313,7 +314,7 @@ function startClock() {
       els.timerChip.textContent = fmtTime(remainingSeconds);
       if (!remainingSeconds && !timerExpiryShown) {
         timerExpiryShown = true;
-        addBubble('system', 'Three-minute round complete. End the session when you are ready to review.');
+        addBubble('system', 'Three-minute round complete. Say “stop listening” when you are ready to review.');
       }
     }
   }, 1000);
@@ -382,7 +383,12 @@ async function startSession() {
       looper.requestResponse();
     },
     onUserText: (text) => {
+      if (!looper) return;
       addBubble('user', text);
+      if (isStopListeningCommand(text)) {
+        stopListening();
+        return;
+      }
       turnCount += 1; updateProgress();
       turnSeq.handleUserTurn(text, { lectureId: activeLecture.id, position: 0 });
     },
@@ -595,11 +601,18 @@ async function exportStudyPack() {
 async function stopSession() {
   sessionStartSerial++;
   clearInterval(tickTimer); tickTimer = null;
+  const hadAvatar = Boolean(liveAvatarSession);
   if (looper) { looper.stop(); looper = null; }
   await stopLiveAvatar();
-  setRoomState('closed', 'Session ended. Your lecture material is ready whenever you are.');
+  if (hadAvatar) els.avatarSetupNote.textContent = 'Avatar disconnected. Start a new session when you are ready.';
+  setRoomState('closed', 'Listening stopped. Your microphone is off.');
   els.start.disabled = !activeLecture || activeLecture.status !== 'ready';
   els.stop.disabled = true;
+}
+
+function stopListening() {
+  void stopSession();
+  addBubble('system', 'Listening stopped. Press Start speaking with Looper when you want to continue.');
 }
 
 document.querySelectorAll('.mode-card').forEach((button) => button.addEventListener('click', () => {
@@ -654,7 +667,7 @@ document.querySelectorAll('[data-resize-panel]').forEach((handle) => handle.addE
 
 els.source.addEventListener('change', () => selectLecture(els.source.value));
 els.start.addEventListener('click', startSession);
-els.stop.addEventListener('click', stopSession);
+els.stop.addEventListener('click', stopListening);
 els.stopReply.addEventListener('click', () => looper?.interrupt());
 els.buildPack.addEventListener('click', buildStudyPack);
 els.exportPack.addEventListener('click', exportStudyPack);
