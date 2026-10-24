@@ -227,3 +227,15 @@ node_modules/
 # Unrelated local documents
 LearnLoop_*.pdf
 LearnLoop_*.docx
+
+# LearnLoop local data (SQLite DB, extracted audio, model cache) — never commit
+data/
+*.db
+*.sqlite3
+
+# Wake-word detector binaries (ONNX models + onnxruntime-web wasm) — large, vendored
+# locally, not source. Re-fetch via the documented steps rather than committing.
+public/wakeword/models/
+public/wakeword/ort/
+poc/models/
+poc/ort/

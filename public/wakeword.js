@@ -14,7 +14,11 @@
 const BASE = '/wakeword';
 
 export function createWakeWordListener({ onDetect, onState, onLevel, onScore,
-                                         detectionThreshold = 0.3, cooldownMs = 2000 } = {}) {
+                                         // The bundled Hey Jarvis model's useful scores are often
+                                         // well below 0.30 on laptop microphones. Keep this at the
+                                         // locally validated 0.10 so an explicitly armed listener
+                                         // can actually hand off to Realtime.
+                                         detectionThreshold = 0.1, cooldownMs = 2000 } = {}) {
   let engine = null;
   let state = 'off';            // off | starting | listening | activated | error
   let lastActivationAt = 0;
@@ -141,17 +145,8 @@ export function createWakeWordListener({ onDetect, onState, onLevel, onScore,
     setState('off', 'Wake word off.');
   }
 
-  /** Manual activation fallback — same effect as a wake-word detection, so the
-   *  demo never depends solely on the model firing. */
-  function trigger() {
-    const now = performance.now();
-    lastActivationAt = now;
-    setState('activated', 'Activated manually');
-    onDetect && onDetect({ keyword: 'manual', score: 1, at: now });
-  }
-
   return {
-    enable, disable, trigger,
+    enable, disable,
     get state() { return state; },
     isActive() { return state === 'listening' || state === 'starting' || state === 'activated'; },
     /** Called by the host after it has handled an activation, to resume passive listening. */

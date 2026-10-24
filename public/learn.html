@@ -228,16 +228,16 @@
                   aria-label="Collapse Jarvis panel" title="Collapse">›</button>
         </div>
 
-        <!-- Activation controls — ALWAYS visible at the top of the rail so both
-             ways to start Jarvis are immediately reachable, whatever the chat height. -->
+        <!-- Wake-word arming is explicit. The manual trigger is debug-only and
+             stays out of the normal product flow. -->
         <div class="looper-activate">
           <div class="looper-row">
-            <button class="ctl" id="wwManual" type="button" title="Start talking to Jarvis now">🎙 Activate</button>
+            <button class="ctl" id="wwManual" type="button" hidden title="Development-only voice trigger">🎙 Activate</button>
             <button class="ctl small" id="wwToggle" type="button" title="Listen for the wake word &quot;Hey Jarvis&quot;">Wake word</button>
           </div>
           <p class="hint hint-collapsible" id="wwHint">
-            Click <strong>Activate</strong> and ask about the lecture, or turn on
-            <code>"Hey Jarvis"</code> (processed locally in your browser).
+            Turn on wake word, then say <code>"Hey Jarvis"</code>. Wake-word
+            audio is processed locally in your browser.
           </p>
           <div class="looper-meterrow">
             <div class="ww-meter" aria-hidden="true"><div class="ww-meter-fill" id="wwMeter"></div></div>
@@ -247,7 +247,7 @@
 
         <!-- Scrollable chat history (fills remaining height) -->
         <section class="looper-panel" id="looperPanel">
-          <div class="looper-convo" id="looperConvo">
+          <div class="looper-convo hidden" id="looperConvo">
             <div class="convo-head" id="convoHead" data-speaking="0" data-thinking="0">
               <span class="pill" id="rtState" data-s="idle">idle</span>
               <span class="speaking-dot" aria-hidden="true" title="Jarvis is speaking"><i></i></span>

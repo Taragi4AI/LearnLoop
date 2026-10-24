@@ -16,6 +16,7 @@ import { createWakeWordListener } from './wakeword.js';
 import { createLooperSession } from './looper-realtime.js';
 import { createTurnSequencer } from './turn-sequencer.js';
 import { shouldApplyResponseEvent, reconcileFinalText, autoScrollDecision } from './chat-stream.js';
+import { isStopListeningCommand, createDisabledMultiSpeakerDetector } from './voice-session.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -357,16 +358,19 @@ let rtActive = false;
 let assistantBubble = null;
 let userBubble = null;        // provisional/finalized user bubble for the current turn
 let activeResponseId = null;  // id of the response currently streaming (stale-event guard)
-let userStoppedExplicitly = false;  // user said/clicked Stop → do NOT auto-restart listening
+let userStoppedExplicitly = false;
+// A detector owns the same physical microphone as the Realtime session. Keep
+// its asynchronous shutdown in one place so we never re-open it mid-teardown.
+let wakeWordTeardown = Promise.resolve();
 
-// Does the user transcript contain an explicit "stop listening" control phrase?
-// Handled as a COMMAND (end the conversation) rather than a question for Jarvis.
-function isStopListeningCommand(text) {
-  const s = (text || '').toLowerCase();
-  return /\bstop listening\b/.test(s)
-      || /\b(stop|quit|end|exit|close)\b.*\b(listening|conversation|talking|session|jarvis)\b/.test(s)
-      || /\b(that'?s all|never mind|nevermind|go away|dismiss)\b/.test(s);
+function disableWakeWord() {
+  wakeWordTeardown = Promise.resolve(wakeword.disable()).catch(() => {});
+  return wakeWordTeardown;
 }
+
+const multiSpeakerDetector = createDisabledMultiSpeakerDetector({
+  onStatus: (status) => logEvent('multi_speaker_detector', status),
+});
 
 // ---- Conversation debug log (timestamped event timeline, exportable as JSON) ----
 let convoLog = [];
@@ -787,12 +791,15 @@ function ensureLecturePausedForSpeech() {
     logEvent('audio_policy', { action: 'keep_playing_suppress_speech' });
     return false;                             // false → session suppresses Looper audio
   }
-  if (!player.isPlaying()) return true;       // already paused → fine
+  // The controller updates its state from the asynchronous `pause` event, but
+  // HTMLMediaElement.paused changes synchronously.  Read the native element so
+  // a successful pause is never misreported as an overlap failure.
+  if (els.video.paused || els.video.ended) return true;
   // If the model started playback mid-session (control_video play), remember to
   // restore it on session end too.
   resumeLectureOnSpeechEnd = true;
   player.pause();
-  const paused = !player.isPlaying();         // verify against the real element
+  const paused = els.video.paused || els.video.ended;
   logEvent('audio_policy', { action: 'pause_for_speech', verified_paused: paused });
   return paused;                              // false → session will suppress Looper audio
 }
@@ -807,6 +814,22 @@ function resumeLectureAfterSpeech(reason) {
   if (!player.canControl() || player.isPlaying()) return;
   player.play();
   logEvent('audio_policy', { action: 'resume_after_speech', reason, playing: player.isPlaying() });
+}
+
+// One application-owned shutdown path.  It deliberately does not touch the
+// lecture: saying stop is about Jarvis' mic/output, never video playback.
+function stopConversation(reason = 'stopped') {
+  if (!rtActive && looper.state === 'closed') return;
+  userStoppedExplicitly = true;
+  wwDesired = false;                 // never silently re-arm after a stop
+  rtActive = false;                  // reject queued/stale UI events immediately
+  const status = reason === 'multiple-speakers'
+    ? 'Stopped listening — multiple speakers detected. Mic off.'
+    : 'Stopped listening — mic off.';
+  addConvo('system', status);
+  logEvent(reason === 'multiple-speakers' ? 'multiple_speakers_stop' : 'stop_listening_command');
+  looper.stop(reason);               // synchronously cancels output + releases Realtime mic
+  disableWakeWord();                 // defensive: it should already be released at hand-off
 }
 
 const looper = createLooperSession({
@@ -856,7 +879,17 @@ const looper = createLooperSession({
     showActionCueResult(call.name, args, result);     // D — confirmed outcome / error
     looper.returnToolResult(call.call_id, result);   // confirmed result back to model
   },
-  onReady: () => { turnSeq.setLecture(currentVideoId); logEvent('session_ready', { lecture_id: currentVideoId }); injectInitialContext(); },
+  onReady: () => {
+    // startMic completed: now (and not on socket-open/session.created) the
+    // panel may truthfully say Listening.
+    ww.convo.classList.remove('hidden');
+    ww.rtState.textContent = 'listening';
+    turnSeq.setLecture(currentVideoId);
+    logEvent('session_ready', { lecture_id: currentVideoId });
+    injectInitialContext();
+  },
+  multiSpeakerDetector,
+  onMultipleSpeakers: () => stopConversation('multiple-speakers'),
   onState: (s, detail) => {
     ww.rtState.dataset.s = s;
     ww.rtState.textContent = RT_LABEL[s] || s;
@@ -880,24 +913,15 @@ const looper = createLooperSession({
       // "listening…" placeholder so we don't leave fabricated text behind.
       if (userBubble) { userBubble.remove(); userBubble = null; }
       if (s === 'error') addConvo('system', detail || 'error');
-      // Resume the lecture if it was playing when Looper took over, so the video
-      // is never left stuck paused after a conversation (the reported bug).
-      resumeLectureAfterSpeech(s);
-      // Return to passive wake-word listening after a conversation ends — UNLESS
-      // the user explicitly stopped (Stop button or "stop listening"). Explicit
-      // stop must stay stopped until the user deliberately re-activates.
-      const explicitStop = userStoppedExplicitly;
-      userStoppedExplicitly = false;
-      setTimeout(() => {
-        ww.convo.classList.add('hidden');
-        if (wwDesired && !explicitStop) wakeword.enable();   // resume passive listening only if not an explicit stop
-      }, 1500);
+      // No automatic wake-word re-arm. A new microphone capture always needs
+      // an explicit user click after a conversation has stopped.
     }
   },
   // User finished/started speaking but the final STT transcript hasn't arrived.
   // Show ONE provisional bubble (distinct styling, no fabricated text) and keep
   // reusing it — never append a duplicate per event.
   onUserPending: () => {
+    if (!rtActive) return;
     if (!userBubble) {
       userBubble = addConvo('you', 'listening…');
       userBubble.classList.add('provisional');
@@ -907,6 +931,9 @@ const looper = createLooperSession({
     refreshContextProactively('turn_start');   // grounding present before server auto-responds
   },
   onUserText: (t) => {
+    // A WebSocket can deliver a final transcription just after the app has
+    // stopped it. Never turn that late event into a fresh conversation turn.
+    if (!rtActive) return;
     // Finalize the user turn: replace the provisional bubble's text in place
     // (no duplicate), or create a finalized bubble if none existed.
     if (userBubble) {
@@ -924,10 +951,8 @@ const looper = createLooperSession({
     // to stop, so we release the mic and do NOT auto-restart wake-word listening.
     if (isStopListeningCommand(t)) {
       logEvent('stop_listening_command', { text: t });
-      addConvo('system', 'Stopped listening.');
-      userStoppedExplicitly = true;
-      looper.stop();
-      return;   // do not forward to the model
+      stopConversation('stopped');
+      return;   // do not forward to the model or keep the Realtime mic open
     }
     // Under server VAD the server auto-responds; we do NOT drive the response.
     // Grounding is kept current by proactive context injection (activation +
@@ -945,12 +970,14 @@ const looper = createLooperSession({
   // is created LAZILY on the first text delta, so a tool-only response (no
   // spoken text) never leaves an empty bubble.
   onResponseStart: (responseId) => {
+    if (!rtActive) return;
     activeResponseId = responseId || activeResponseId;
     assistantBubble = null;   // next delta for this id creates+keys the bubble
   },
   // Looper's response was interrupted (barge-in). Keep whatever text we received
   // and mark it clearly as interrupted rather than silently finalizing.
   onAssistantInterrupted: (responseId) => {
+    if (!rtActive) return;
     const b = bubbleForResponse(responseId);
     if (b) {
       b.classList.remove('streaming');
@@ -962,6 +989,7 @@ const looper = createLooperSession({
     hideCue('speaking');          // E → will transition to listening via barge_in mark
   },
   onAssistantText: (delta, done, responseId, finalText) => {
+    if (!rtActive) return;
     // Reject text events belonging to a superseded response (pure guard).
     const bubbleId = assistantBubble?.dataset.responseId;
     if (!shouldApplyResponseEvent(responseId, activeResponseId, bubbleId)) {
@@ -1142,7 +1170,11 @@ function convoNearBottom() {
 }
 function convoScrollToBottom() {
   if (!convoScroll) return;
-  convoScroll.scrollTop = convoScroll.scrollHeight;
+  const scroll = () => { convoScroll.scrollTop = convoScroll.scrollHeight; };
+  scroll();
+  // Streaming text can increase layout height after this call; settle at the
+  // true bottom on the next frame without moving the page itself.
+  requestAnimationFrame(scroll);
   followingBottom = true;
   jumpLatestBtn?.classList.add('hidden');
 }
@@ -1233,11 +1265,15 @@ function startConversation() {
   hideCue();
   setSpeakingIndicator(false);
   resetConvoLog();                   // begin a fresh timestamped debug timeline
-  ww.convo.classList.remove('hidden');
+  // Leave the panel hidden while connecting: "Listening" is truthful only
+  // once startMic has succeeded (onReady above).
   looper.start();
 }
 
-ww.rtStop.addEventListener('click', () => { logEvent('user_stop'); userStoppedExplicitly = true; looper.stop(); rtActive = false; });
+ww.rtStop.addEventListener('click', () => {
+  logEvent('user_stop');
+  stopConversation('stopped');
+});
 ww.rtExport.addEventListener('click', exportConvoLog);
 const WW_LABEL = {
   off: 'Wake word off', starting: 'Starting…',
@@ -1257,40 +1293,42 @@ const wakeword = createWakeWordListener({
   onLevel: (rms) => { ww.meter.style.width = Math.min(100, Math.round(rms * 400)) + '%'; },
   onScore: (s) => {
     // Live wake-word model score (0..1). Lets you see sensitivity without DevTools.
-    ww.score.textContent = 'score ' + s.toFixed(2);
+    ww.score.textContent = 'score ' + s.toFixed(3);
     ww.meter.style.width = Math.min(100, Math.round(s * 100)) + '%';
     ww.meter.style.background = s > 0.3 ? '#7ee0a2' : '#6ea8fe';
   },
   onDetect: () => {
-    // G3.2: on activation, pause the lecture, release the wake-word mic, and
-    // hand the single microphone to a Higgs Realtime conversation.
+    // Release local-only wake-word capture BEFORE opening the Realtime mic.
+    // Detection itself never changes lecture playback.
     ww.activated?.classList.remove('hidden');   // null-safe: banner removed in rail layout
-    captureResumeIntent();   // remember to resume the lecture when the session ends
-    player.pause();   // explicit, idempotent — pauses the real video before the conversation
-    // Release the detector's mic BEFORE opening the Realtime mic (one capture at a time).
-    wakeword.disable().finally(() => {
+    wwDesired = false;
+    disableWakeWord().finally(() => {
       ww.activated?.classList.add('hidden');
       startConversation();
     });
   },
 });
 
-let wwDesired = false;   // user's intent to have wake word on (survives activation handoff)
+let wwDesired = false;   // explicit wake-word arm state; cleared at hand-off/stop
 ww.toggle.addEventListener('click', () => {
-  if (wwOn) { wwDesired = false; wakeword.disable(); }
+  if (wwOn) { wwDesired = false; disableWakeWord(); }
   else { wwDesired = true; wakeword.enable(); }
 });
-// Manual activation — guaranteed demo path, independent of the wake-word model.
-// Works whether or not wake-word listening is enabled.
-ww.manual.addEventListener('click', () => {
-  if (rtActive) return;
-  captureResumeIntent();   // remember to resume the lecture when the session ends
-  player.pause();   // pause the lecture before the conversation starts
-  wakeword.disable().finally(startConversation);
-});
+// Development-only manual trigger. It is intentionally absent from normal UI;
+// production sessions begin exclusively after the local "Hey Jarvis" detector.
+const debugManualVoice = new URLSearchParams(window.location.search).has('debugVoice')
+  || window.__LL_DEBUG_VOICE_MANUAL === true;
+if (debugManualVoice && ww.manual) {
+  ww.manual.hidden = false;
+  ww.manual.addEventListener('click', () => {
+    if (rtActive) return;
+    wwDesired = false;
+    disableWakeWord().finally(startConversation);
+  });
+}
 // Ensure the mic is released if the user closes the lecture or leaves the page.
-els.closeBtn.addEventListener('click', () => { try { wakeword.disable(); } catch {} });
-window.addEventListener('beforeunload', () => { try { wakeword.disable(); } catch {} });
+els.closeBtn.addEventListener('click', () => { try { disableWakeWord(); } catch {} });
+window.addEventListener('beforeunload', () => { try { disableWakeWord(); } catch {} });
 
 // ---------------------------------------------------------------------------
 // Bookmarks (G5 "Remember"): save current moment + reopen to seek. Persisted

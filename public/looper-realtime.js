@@ -40,12 +40,12 @@ const LOOPER_INSTRUCTIONS =
   'To jump to where a concept was explained, use the lecture transcript context you are given ' +
   'to find the timestamp, then call seek_video. Only claim an action succeeded after the tool ' +
   'result confirms it. Never save a bookmark without explicit user approval. ' +
-  'When the user asks you to PLAY or RESUME the lecture, just call control_video(play) and ' +
-  'stay quiet — do NOT say "playing now" or announce it, because the lecture is now playing ' +
-  'and speaking would interrupt it. ' +
-  'If the user says "stop listening", "that\'s all", "never mind", or otherwise asks you to ' +
-  'stop, acknowledge briefly ("Okay, stopping.") — the app will end the session; do not treat ' +
-  'it as a confusing request or ask them to clarify.';
+  'For every playback control request — pause, play, resume, seek, rewind, forward, mute, ' +
+  'volume, or speed — call the appropriate tool and stay quiet after a successful result. ' +
+  'Do not announce actions such as "The lecture is now paused" or "Playing now" because ' +
+  'the control itself is the confirmation and speech can interrupt the lecture. ' +
+  'Do not end the listening session yourself. The app handles its explicit Stop control; ' +
+  'continue normally when a user merely mentions stopping or listening.';
 
 // G5 agentic tools exposed to Higgs Realtime. Names/params are the contract the
 // model calls; the HOST executes them against trusted app state and returns a
@@ -78,7 +78,7 @@ export const LOOPER_TOOLS = [
         timestamp_seconds: { type: 'number', description: 'Absolute seconds from the start.' },
         minutes: { type: 'number', description: 'Minutes part (use with seconds).' },
         seconds: { type: 'number', description: 'Seconds part 0–59 (use with minutes).' },
-      } } },
+      }, required: ['timestamp_seconds'] } },
   { type: 'function', name: 'prepare_bookmark',
     description: 'Propose (do NOT save) a bookmark for the current moment or a given timestamp. '
       + 'Shows the user a preview to approve.',
@@ -120,7 +120,8 @@ export const LOOPER_TOOLS = [
 export function createLooperSession({ onState, onUserText, onAssistantText, onReady, onToolCall,
                                       beforeAgentAudio, onAgentAudioStart, onAgentAudioEnd,
                                       onUserPending, onAssistantInterrupted, onResponseStart,
-                                      onMark, onTurnEnd,
+                                      onMark, onTurnEnd, onMultipleSpeakers,
+                                      multiSpeakerDetector,
                                       // Tunables (issue 3 — latency). silenceCallbacks controls how
                                       // many quiet ~85ms frames end a turn: 12≈2.0s (old), 6≈1.0s (new
                                       // default). Lower = snappier but risks cutting mid-sentence pauses.
@@ -131,7 +132,12 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   let outputGain = null, playHead = 0, scheduled = [];
   let state = 'idle';     // idle | connecting | live | speaking | error | closed
   let starting = false;
+  let stopping = false;
+  let sessionGeneration = 0; // invalidates async callbacks from a closed socket
   let activeResponseId = null;   // id of the response currently streaming (for stale-guarding)
+  let activeAudioItemId = null;
+  let audioPlaybackStartedAt = null;
+  let detectorStarted = false;
 
   // ---- Manual-turn client VAD (adaptive) ----
   // A fixed RMS threshold fails because mic gain / room noise vary. Instead we
@@ -225,15 +231,28 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   // Stop Looper promptly and cancel the active Higgs response (supported
   // protocol: response.cancel). Guard stale audio so late deltas don't restart
   // playback. Does NOT roll back any tool action that already executed.
-  function bargeInCancel() {
-    if (state !== 'speaking') return;
-    mark('barge_in');
-    cancelledResponseId = activeResponseId;
+  function interruptActiveResponse(reason = 'barge_in') {
+    if (stopping || (activeResponseId && cancelledResponseId === activeResponseId)) return false;
+    mark(reason);
+    if (activeResponseId) cancelledResponseId = activeResponseId;
     stopPlayback();
     agentAudioOpen = false;
-    send({ type: 'response.cancel' });        // ask the server to stop generating
+    // If local playback ended early, truncate the stored audio item to what the
+    // person actually heard. Some server events do not expose an item id; in
+    // that case cancellation is still safe and the native VAD owns the turn.
+    if (activeAudioItemId) {
+      send({ type: 'conversation.item.truncate', item_id: activeAudioItemId,
+             content_index: 0, audio_end_ms: heardAudioEndMs() });
+    }
+    send({ type: 'response.cancel' });
     onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
     onAgentAudioEnd && onAgentAudioEnd();
+    return true;
+  }
+
+  function bargeInCancel() {
+    if (state !== 'speaking') return;
+    interruptActiveResponse('barge_in');
     awaitingAnswer = false;                    // allow the follow-up turn to commit
     speaking = false; silenceFrames = 0;
     setState('live', 'Listening…');
@@ -270,6 +289,12 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
 
   async function start() {
     if (starting || (ws && ws.readyState === WebSocket.OPEN)) return;  // no duplicate sessions
+    const generation = ++sessionGeneration;
+    stopping = false;
+    cancelledResponseId = null;
+    activeResponseId = null;
+    activeAudioItemId = null;
+    audioPlaybackStartedAt = null;
     starting = true;
     setState('connecting', 'Requesting session…');
     try {
@@ -282,29 +307,34 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
       if (!res.ok) throw new Error(secret?.error?.message || `secret ${res.status}`);
       const ephemeralKey = secret.value;
       if (!ephemeralKey) throw new Error('No client secret returned.');
+      if (stopping || generation !== sessionGeneration) { starting = false; return; }
 
       // 2) Open the WebSocket with the ephemeral key as subprotocol bearer.
       setState('connecting', 'Connecting to Higgs Realtime…');
       ws = new WebSocket(WS_URL, [
         'realtime',
-        `openai-insecure-api-key.${ephemeralKey}`,
+        `bai-client-secret.${ephemeralKey}`,
         'openai-beta.realtime-v1',
       ]);
-      ws.addEventListener('open', onOpen);
-      ws.addEventListener('message', onMessage);
-      ws.addEventListener('error', () => setState('error', 'Connection error.'));
+      ws.addEventListener('open', () => onOpen(generation));
+      ws.addEventListener('message', (evt) => onMessage(evt, generation));
+      ws.addEventListener('error', () => {
+        if (!stopping && generation === sessionGeneration) setState('error', 'Connection error.');
+      });
       ws.addEventListener('close', () => {
+        if (generation !== sessionGeneration) return;
         teardownAudio();
-        if (state !== 'error') setState('closed', 'Session ended.');
+        if (state !== 'error' && state !== 'closed') setState('closed', 'Session ended.');
         starting = false;
       });
     } catch (err) {
-      setState('error', String(err.message || err));
+      if (!stopping && generation === sessionGeneration) setState('error', String(err.message || err));
       starting = false;
     }
   }
 
-  async function onOpen() {
+  async function onOpen(generation) {
+    if (stopping || generation !== sessionGeneration) return;
     // Exact Higgs Realtime session schema (verified working in the playground).
     send({
       type: 'session.update',
@@ -337,6 +367,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     });
     try {
       await startMic();                       // mic streaming begins HERE, post-activation only
+      if (stopping || generation !== sessionGeneration) return;
       setState('live', 'Listening — speak now.');
       starting = false;
       onReady && onReady();                   // host injects initial lecture context (G4)
@@ -346,7 +377,8 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     }
   }
 
-  function onMessage(evt) {
+  function onMessage(evt, generation) {
+    if (stopping || generation !== sessionGeneration) return; // a close races with queued WS frames
     let msg; try { msg = JSON.parse(evt.data); } catch { return; }
     switch (msg.type) {
       case 'session.created': setState('live', 'Session ready — speak now.'); break;
@@ -355,11 +387,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         // native BARGE-IN signal: stop local playback (the server truncates its
         // own in-flight response automatically). Mark the bubble interrupted.
         if (state === 'speaking' || agentAudioOpen) {
-          mark('barge_in');
-          cancelledResponseId = activeResponseId;
-          stopPlayback(); agentAudioOpen = false;
-          onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
-          onAgentAudioEnd && onAgentAudioEnd();
+          interruptActiveResponse('barge_in');
         }
         onUserPending && onUserPending();      // user is speaking → provisional bubble
         setState('live', 'Listening…'); break;
@@ -377,6 +405,8 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         const newId = (msg.response && msg.response.id) || msg.response_id || null;
         if (newId && newId !== activeResponseId) stopPlayback();
         activeResponseId = newId || activeResponseId;
+        activeAudioItemId = msg.item_id || msg.output_item_id || null;
+        audioPlaybackStartedAt = null;
         firstTextMarked = false; firstAudioMarked = false;
         mark('response_created', { responseId: activeResponseId });
         onResponseStart && onResponseStart(activeResponseId);
@@ -385,14 +415,15 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
       case 'response.output_audio.delta':
       case 'response.audio.delta': {
         const rid = msg.response_id || activeResponseId;
-        if (rid && rid === cancelledResponseId) break;   // stale: cancelled response, drop audio
+        if (rid && (rid === cancelledResponseId || (activeResponseId && rid !== activeResponseId))) break;
+        if (msg.item_id) activeAudioItemId = msg.item_id;
         if (msg.delta) { if (!firstAudioMarked) { firstAudioMarked = true; mark('first_audio'); } gateAndPlay(msg.delta); }
         break;
       }
       case 'response.output_audio_transcript.delta':
       case 'response.audio_transcript.delta': {
         const rid = msg.response_id || activeResponseId;
-        if (rid && rid === cancelledResponseId) break;   // stale: cancelled, drop text
+        if (rid && (rid === cancelledResponseId || (activeResponseId && rid !== activeResponseId))) break;
         // Pass the response id so the host associates this delta with the right
         // message and ignores stale deltas from a superseded response.
         if (msg.delta) { if (!firstTextMarked) { firstTextMarked = true; mark('first_text'); } onAssistantText && onAssistantText(msg.delta, false, rid); }
@@ -407,7 +438,6 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         if (doneRid && doneRid === cancelledResponseId) {
           // This is the server acknowledging our barge-in cancel. UI/state were
           // already handled in bargeInCancel(); don't re-finalize or re-set state.
-          cancelledResponseId = null;
           break;
         }
         // A response may END in client tool calls (G5). Execute those and
@@ -466,7 +496,13 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
       // beforeAgentAudio returns true if it's safe (lecture paused) to play.
       agentAudioAllowed = beforeAgentAudio ? beforeAgentAudio() !== false : true;
       if (agentAudioAllowed) { onAgentAudioStart && onAgentAudioStart(); setState('speaking', 'Looper is speaking…'); }
-      else { setState('error', 'Could not pause the lecture; suppressing Looper audio to avoid overlap.'); }
+      else {
+        // Audio suppression protects against overlap, but the text conversation
+        // remains healthy.  Do not transition to terminal `error`: the host
+        // would otherwise append this same status as a red chat card for every
+        // new response and leave the microphone session in an invalid state.
+        setState('live', 'Response audio suppressed while the lecture is playing.');
+      }
     }
     if (agentAudioAllowed) playPcmChunk(base64);
   }
@@ -495,6 +531,18 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
+    if (multiSpeakerDetector?.start) {
+      // VAD/volume cannot identify people. The default implementation is an
+      // explicit disabled fallback; a vetted local diarization/overlap model
+      // can use this narrow, testable interface without network egress.
+      detectorStarted = true;
+      await multiSpeakerDetector.start({ stream: micStream, onMultipleSpeakers: () => {
+        if (stopping) return;
+        onMultipleSpeakers && onMultipleSpeakers();
+        stop('multiple-speakers');
+      } });
+      if (stopping) return;
+    }
     micSource = audioCtx.createMediaStreamSource(micStream);
     // Diagnostic (no raw audio): what the browser actually granted.
     try {
@@ -532,6 +580,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     srcNode.connect(outputGain || audioCtx.destination);
     const now = audioCtx.currentTime;
     if (playHead < now) playHead = now;
+    if (audioPlaybackStartedAt == null) audioPlaybackStartedAt = playHead;
     srcNode.start(playHead);
     playHead += buffer.duration;
     scheduled.push(srcNode);
@@ -544,22 +593,43 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     if (audioCtx) playHead = audioCtx.currentTime;
   }
 
+  function heardAudioEndMs() {
+    if (!audioCtx || audioPlaybackStartedAt == null) return 0;
+    return Math.max(0, Math.floor((audioCtx.currentTime - audioPlaybackStartedAt) * 1000));
+  }
+
   function teardownAudio() {
     stopPlayback();
     try { micNode && micNode.disconnect(); } catch {}
     try { micSource && micSource.disconnect(); } catch {}
     try { outputGain && outputGain.disconnect(); } catch {}
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+    if (detectorStarted) { try { multiSpeakerDetector?.stop?.(); } catch {} detectorStarted = false; }
     if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
     micNode = micSource = outputGain = null;
   }
 
-  function stop() {
+  function stop(reason = 'stopped') {
+    if (stopping || state === 'closed') return;
+    stopping = true;
+    sessionGeneration++;
+    // stop() deliberately owns its own cancellation, not only response.done,
+    // so scheduled audio and stale deltas cannot resurrect a closed session.
+    if (activeResponseId && cancelledResponseId !== activeResponseId) {
+      cancelledResponseId = activeResponseId;
+      stopPlayback();
+      if (activeAudioItemId) {
+        send({ type: 'conversation.item.truncate', item_id: activeAudioItemId,
+               content_index: 0, audio_end_ms: heardAudioEndMs() });
+      }
+      send({ type: 'response.cancel' });
+      onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
+    }
     try { ws && ws.close(); } catch {}
     ws = null;
     teardownAudio();
     starting = false;
-    setState('closed', 'Session stopped.');
+    setState('closed', reason === 'multiple-speakers' ? 'Multiple speakers detected.' : 'Session stopped.');
   }
 
   return { start, stop, sendContext, requestResponse, returnToolResult, get state() { return state; } };
