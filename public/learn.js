@@ -18,6 +18,7 @@ import { el } from './shared.js';
 import { createSearchNav } from './search-nav.js';
 import { createWakeWordListener } from './wakeword.js';
 import { createLooperSession } from './looper-realtime.js';
+import { createLiveAvatarClient } from './live-avatar-client.js';
 import { createTurnSequencer } from './turn-sequencer.js';
 import { shouldApplyResponseEvent, reconcileFinalText, autoScrollDecision } from './chat-stream.js';
 import { isStopListeningCommand, createDisabledMultiSpeakerDetector } from './voice-session.js';
@@ -441,6 +442,18 @@ const ww = {
   rtExport: $('#rtExport'),
   rtLog: $('#rtLog'),
 };
+const avatarUi = {
+  video: $('#jarvisAvatarVideo'), frame: $('#jarvisAvatarFrame'),
+  start: $('#jarvisAvatarStart'), stop: $('#jarvisAvatarStop'),
+  status: $('#jarvisAvatarStatus'),
+};
+const avatarClient = createLiveAvatarClient({
+  video: avatarUi.video, frame: avatarUi.frame,
+  onPlaybackFinished: (event) => looper.avatarPlaybackFinished(event),
+  onVideoChange: (visible) => {
+    if (avatarClient.active) avatarUi.status.textContent = visible ? 'Avatar and voice connected' : 'Waiting for avatar video…';
+  },
+});
 
 // ---- Looper live conversation (G3.2) ----
 const RT_LABEL = {
@@ -1062,6 +1075,7 @@ function pauseConversationForWakeWord(reason = 'stop command') {
     return false;
   }
   addConvo('system', 'Stopped listening — say “Hey Jarvis” to continue.');
+  if (avatarClient.active) void stopAvatar();
   logEvent('session_input_paused', { reason });
   rearmWakeWord();
   return true;
@@ -1091,6 +1105,7 @@ async function resumeConversationFromWakeWord() {
 }
 
 const looper = createLooperSession({
+  avatarOutput: avatarClient,
   silenceCallbacks: 6,        // ~1.0s end-of-turn (was 12≈2.0s) — issue 3 latency
   // Latency instrumentation: each pipeline mark is timestamped in the chat log
   // so before/after latency is measurable from the exported JSON. Also drives
@@ -1160,6 +1175,7 @@ const looper = createLooperSession({
     const thinking = (s === 'speaking') || (/thinking/i.test(detail || ''));
     setThinkingIndicator(thinking && s !== 'closed' && s !== 'error');
     if (s === 'closed' || s === 'error') {
+      if (avatarClient.active) void stopAvatar();
       clearCalmWalkthrough(s === 'error' ? 'session_error' : 'session_end');
       latestAssistantAnswer = null;
       rtActive = false;
@@ -2593,6 +2609,52 @@ async function reattachLecture(lec) {
     startPolling();
   }
 }
+
+async function stopAvatar() {
+  if (avatarClient.active) {
+    avatarUi.status.textContent = 'Disconnecting avatar…';
+    await avatarClient.stop();
+  }
+  avatarUi.start.disabled = false;
+  avatarUi.stop.classList.add('hidden');
+  avatarUi.status.textContent = 'Avatar off';
+}
+
+avatarUi.start.addEventListener('click', async () => {
+  avatarUi.start.disabled = true;
+  avatarUi.status.textContent = 'Connecting to Higgs Avatar…';
+  try {
+    if (rtActive) stopConversation('switching to avatar');
+    await avatarClient.stop();
+    wakeWordDesired = false;
+    await disableWakeWord();
+    if (player.canControl() && player.isPlaying()) player.pause();
+    const listResponse = await fetch('/api/avatars');
+    const list = listResponse.ok ? await listResponse.json() : {};
+    const avatars = Array.isArray(list.data) ? list.data : [];
+    const avatarId = avatars.some((item) => item.avatar_id === 'builtin_emma_v1')
+      ? 'builtin_emma_v1' : (avatars[0]?.avatar_id || 'builtin_emma_v1');
+    await avatarClient.start(avatarId);
+    avatarUi.stop.classList.remove('hidden');
+    avatarUi.status.textContent = 'Waiting for avatar video…';
+    startConversation();
+  } catch (error) {
+    await avatarClient.stop();
+    avatarUi.start.disabled = false;
+    avatarUi.stop.classList.add('hidden');
+    avatarUi.status.textContent = error.status === 429
+      ? `Avatar busy. Try again in ${Math.ceil(error.retryAfter)}s.`
+      : `Avatar unavailable: ${error.message}`;
+  }
+});
+avatarUi.stop.addEventListener('click', () => {
+  if (rtActive) stopConversation('stopped');
+  void stopAvatar();
+});
+window.addEventListener('pagehide', () => {
+  const sessionId = avatarClient.sessionId;
+  if (sessionId) fetch(`/api/live-avatar/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE', keepalive: true }).catch(() => {});
+});
 
 // Expose a tiny hook for diagnostics (not required by the app).
 document.querySelectorAll('#avatarStudyLink, #studyBuddyLink').forEach((link) => {

@@ -39,7 +39,6 @@
         <p class="hero-sub">Drop in a video and LearnLoop transcribes it locally, lets you search and
           jump to any moment, and gives you <strong>Jarvis</strong> — a voice tutor grounded in what
           the lecturer actually said.</p>
-        <a class="ctl small" href="/revise.html">Open the live avatar study buddy →</a>
       </div>
 
       <div class="drop-zone" id="dropZone" tabindex="0" role="button"
@@ -251,6 +250,18 @@
           </p>
         </div>
 
+        <div class="jarvis-avatar" id="jarvisAvatar">
+          <div class="jarvis-avatar-frame" id="jarvisAvatarFrame" data-live-video="false">
+            <div class="jarvis-avatar-waiting">Talk face to face with Jarvis</div>
+            <video class="jarvis-avatar-video hidden" id="jarvisAvatarVideo" autoplay playsinline aria-label="Live Jarvis avatar"></video>
+          </div>
+          <div class="jarvis-avatar-actions">
+            <button class="ctl small" id="jarvisAvatarStart" type="button">Talk with avatar</button>
+            <button class="ctl small hidden" id="jarvisAvatarStop" type="button">Stop avatar</button>
+            <span id="jarvisAvatarStatus" role="status" aria-live="polite">Live Higgs avatar</span>
+          </div>
+        </div>
+
         <!-- Scrollable chat history (fills remaining height) -->
         <section class="looper-panel" id="looperPanel">
           <div class="looper-convo hidden" id="looperConvo">
@@ -312,6 +323,7 @@
     </dialog>
   </main>
 
+  <script src="/vendor/livekit-client.umd.min.js"></script>
   <script type="module" src="learn.js"></script>
 </body>
 </html>

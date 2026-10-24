@@ -137,6 +137,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
                                       onUserPending, onAssistantInterrupted, onResponseStart,
                                       onMark, onTurnEnd, onMultipleSpeakers,
                                       multiSpeakerDetector,
+                                      avatarOutput = null,
                                       // Tunables (issue 3 — latency). silenceCallbacks controls how
                                       // many quiet ~85ms frames end a turn: 12≈2.0s (old), 6≈1.0s (new
                                       // default). Lower = snappier but risks cutting mid-sentence pauses.
@@ -146,6 +147,9 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   let audioCtx = null, micStream = null, micNode = null, micSource = null;
   let outputGain = null, playHead = 0, scheduled = [];
   let state = 'idle';     // idle | connecting | live | speaking | paused | error | closed
+  let avatarPlaybackPending = false;
+  let avatarPlaybackTimer = null;
+  let avatarAudioMs = 0;
   let starting = false;
   let stopping = false;
   let inputPaused = false; // socket retained; microphone forwarding detached
@@ -253,11 +257,13 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     // so it alone is NOT proof that the provider still has a cancellable
     // response. Calling response.cancel after response.done produces the
     // provider's "No active response to cancel" error.
-    if (stopping || !responseActive || !activeResponseId || cancelledResponseId === activeResponseId) return false;
+    if (stopping || (!responseActive && !avatarPlaybackPending) || !activeResponseId || cancelledResponseId === activeResponseId) return false;
     mark(reason);
     if (activeResponseId) cancelledResponseId = activeResponseId;
     responseActive = false;
     stopPlayback();
+    avatarPlaybackPending = false;
+    clearTimeout(avatarPlaybackTimer); avatarPlaybackTimer = null;
     agentAudioOpen = false;
     // semantic_vad owns barge-in server-side. Sending a second cancel races the
     // provider's automatic cancellation and can produce "No active response to
@@ -437,6 +443,9 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         // over the new one (audio is scheduled ahead of real time).
         const newId = (msg.response && msg.response.id) || msg.response_id || null;
         if (newId && newId !== activeResponseId) stopPlayback();
+        avatarPlaybackPending = false;
+        clearTimeout(avatarPlaybackTimer); avatarPlaybackTimer = null;
+        avatarAudioMs = 0;
         activeResponseId = newId || activeResponseId;
         responseActive = true;
         activeAudioItemId = msg.item_id || msg.output_item_id || null;
@@ -487,6 +496,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
           (it) => it && it.type === 'function_call' && (it.executor === 'client' || it.executor == null)
         );
         if (clientCalls.length && onToolCall) {
+          if (avatarOutput?.active) avatarOutput.flush();
           setState('speaking', 'Looper is taking an action…');
           // Host executes each call and returns the result via returnToolResult.
           for (const call of clientCalls) onToolCall(call);
@@ -511,8 +521,16 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
           onAssistantText && onAssistantText('', true, doneId, finalText);
         }
         awaitingAnswer = false;               // ready for the next manual turn
-        agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
-        setState('live', 'Listening — speak now.');
+        if (avatarOutput?.active && agentAudioOpen && agentAudioAllowed) {
+          avatarOutput.flush();
+          avatarPlaybackPending = true;
+          setState('speaking', 'Jarvis is finishing her reply…');
+          avatarPlaybackTimer = setTimeout(finishAvatarPlayback,
+            Math.min(60000, Math.max(10000, avatarAudioMs + 10000)));
+        } else {
+          agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
+          setState('live', 'Listening — speak now.');
+        }
         break;
       }
       case 'error':
@@ -530,6 +548,19 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   let agentAudioOpen = false;     // policy resolved for the current response?
   let agentAudioAllowed = false;  // may we play this response's audio?
 
+  function finishAvatarPlayback() {
+    if (!avatarPlaybackPending) return;
+    avatarPlaybackPending = false;
+    clearTimeout(avatarPlaybackTimer); avatarPlaybackTimer = null;
+    agentAudioOpen = false;
+    onAgentAudioEnd && onAgentAudioEnd();
+    setState('live', 'Listening — speak now.');
+  }
+
+  function avatarPlaybackFinished(event) {
+    if (!event?.interrupted) finishAvatarPlayback();
+  }
+
   function gateAndPlay(base64) {
     if (!agentAudioOpen) {
       agentAudioOpen = true;
@@ -544,7 +575,12 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         setState('live', 'Response audio suppressed while the lecture is playing.');
       }
     }
-    if (agentAudioAllowed) playPcmChunk(base64);
+    if (agentAudioAllowed) {
+      if (avatarOutput?.active) {
+        avatarAudioMs += Math.floor(base64.length * 3 / 4) / (SAMPLE_RATE * 2) * 1000;
+        avatarOutput.audio(base64);
+      } else playPcmChunk(base64);
+    }
   }
 
   /** Inject a grounding/context text message into the live conversation (G4).
@@ -664,6 +700,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     scheduled.forEach((s) => { try { s.stop(); } catch {} });
     scheduled = [];
     if (audioCtx) playHead = audioCtx.currentTime;
+    if (avatarOutput?.active) avatarOutput.clear();
   }
 
   function heardAudioEndMs() {
@@ -685,6 +722,8 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   function stop(reason = 'stopped') {
     if (stopping || state === 'closed') return;
     stopping = true;
+    avatarPlaybackPending = false;
+    clearTimeout(avatarPlaybackTimer); avatarPlaybackTimer = null;
     inputPaused = false;
     sessionGeneration++;
     // Closing the socket ends a response on the provider. Do not race that
@@ -703,7 +742,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     setState('closed', reason === 'multiple-speakers' ? 'Multiple speakers detected.' : 'Session stopped.');
   }
 
-  return { start, stop, pauseInput, resumeInput, sendContext, requestResponse, returnToolResult,
+  return { start, stop, pauseInput, resumeInput, sendContext, requestResponse, returnToolResult, avatarPlaybackFinished,
            get state() { return state; } };
 }
 

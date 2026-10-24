@@ -1,6 +1,7 @@
 import { createLooperSession } from './avatar-realtime.js';
 import { createTurnSequencer } from './turn-sequencer.js';
 import { isStopListeningCommand } from './voice-session.js';
+import { createLiveAvatarClient } from './live-avatar-client.js';
 
 const $ = (s) => document.querySelector(s);
 const els = {
@@ -43,11 +44,11 @@ let timedSession = false;
 let timerExpiryShown = false;
 let currentKnowledgeTab = 'transcript';
 let knowledgeExpanded = false;
-let liveAvatarSession = null;
-let liveKitRoom = null;
-let avatarRelay = null;
-let remoteAvatarAudio = [];
 let sessionStartSerial = 0;
+const liveAvatar = createLiveAvatarClient({
+  video: els.avatarVideo, frame: els.avatarPhotoWrap,
+  onPlaybackFinished: (event) => looper?.avatarPlaybackFinished(event),
+});
 
 async function loadAvatarOptions() {
   try {
@@ -78,98 +79,12 @@ async function loadAvatarOptions() {
   }
 }
 
-function relayAvatarAudio(type, delta) {
-  if (!avatarRelay || avatarRelay.readyState !== WebSocket.OPEN) return;
-  avatarRelay.send(JSON.stringify({ type, ...(delta ? { delta } : {}) }));
-}
-
 async function startLiveAvatar() {
-  if (!window.LivekitClient) throw new Error('The local LiveKit browser client did not load. Restart LearnLoop and refresh the page.');
-  const response = await fetch('/api/live-avatar/sessions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ avatar_id: els.avatarId.value }),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    const detail = data.error || {};
-    const codes = [detail.type, detail.code].filter(Boolean).join(' · ');
-    const retryAfter = response.headers.get('Retry-After');
-    const retryHint = retryAfter ? ` Retry after ${retryAfter} seconds.` : '';
-    const requestId = response.headers.get('X-Boson-Request-ID');
-    const requestHint = requestId ? ` Boson request ID: ${requestId}.` : '';
-    const message = detail.message || 'Live avatar setup failed.';
-    const error = new Error(`${message}${codes ? ` [${codes}]` : ''} (HTTP ${response.status}).${retryHint}${requestHint}`);
-    error.status = response.status;
-    error.code = detail.code;
-    error.retryAfter = Number(retryAfter) || 5;
-    throw error;
-  }
-  liveAvatarSession = data;
-
-  const { Room, RoomEvent } = window.LivekitClient;
-  const room = new Room({ adaptiveStream: true, dynacast: true });
-  liveKitRoom = room;
-  room.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
-    if (participant.identity !== data.avatar_identity) return;
-    if (track.kind === 'video') {
-      track.attach(els.avatarVideo);
-      els.avatarPhotoWrap.dataset.liveVideo = 'true';
-      els.avatarVideo.classList.remove('hidden');
-      els.avatarVideo.play().catch(() => {});
-    } else if (track.kind === 'audio') {
-      const audio = track.attach();
-      audio.autoplay = true;
-      audio.hidden = true;
-      document.body.append(audio);
-      remoteAvatarAudio.push(audio);
-      room.startAudio().catch(() => {});
-    }
-  });
-  room.on(RoomEvent.TrackUnsubscribed, (track) => {
-    track.detach().forEach((element) => element.remove());
-    els.avatarPhotoWrap.dataset.liveVideo = 'false';
-    els.avatarVideo.classList.add('hidden');
-  });
-  room.on(RoomEvent.Disconnected, () => {
-    els.avatarPhotoWrap.dataset.liveVideo = 'false';
-    els.avatarVideo.classList.add('hidden');
-  });
-  await room.connect(data.livekit_url, data.viewer_token);
-
-  const wsUrl = new URL(`/api/live-avatar/sessions/${encodeURIComponent(data.session_id)}/audio`, location.href);
-  wsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const socket = new WebSocket(wsUrl);
-  avatarRelay = socket;
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out connecting the avatar audio stream.')), 8000);
-    socket.onopen = () => socket.send(JSON.stringify({ type: 'auth', token: data.relay_token }));
-    socket.onmessage = (event) => {
-      let message; try { message = JSON.parse(event.data); } catch { return; }
-      if (message.type === 'ready') { clearTimeout(timer); resolve(); }
-      if (message.type === 'error') { clearTimeout(timer); reject(new Error(message.message || 'Avatar audio stream failed.')); }
-      if (message.type === 'playback_finished') looper?.avatarPlaybackFinished(message);
-    };
-    socket.onerror = () => { clearTimeout(timer); reject(new Error('Could not connect the avatar audio stream.')); };
-  });
+  await liveAvatar.start(els.avatarId.value);
 }
 
 async function stopLiveAvatar() {
-  const session = liveAvatarSession;
-  const socket = avatarRelay;
-  const room = liveKitRoom;
-  liveAvatarSession = null; avatarRelay = null; liveKitRoom = null;
-  if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
-  if (room) { try { await room.disconnect(); } catch {} }
-  remoteAvatarAudio.forEach((audio) => { try { audio.pause(); audio.srcObject = null; audio.remove(); } catch {} });
-  remoteAvatarAudio = [];
-  els.avatarPhotoWrap.dataset.liveVideo = 'false';
-  els.avatarVideo.classList.add('hidden');
-  els.avatarVideo.srcObject = null;
-  if (session?.session_id) {
-    try {
-      await fetch(`/api/live-avatar/sessions/${encodeURIComponent(session.session_id)}`, { method: 'DELETE', keepalive: true });
-    } catch {}
-  }
+  await liveAvatar.stop();
 }
 
 
@@ -402,17 +317,14 @@ async function startSession() {
     },
     onAgentAudioStart: () => { els.avatar.dataset.state = 'speaking'; },
     onAssistantAudioDelta: (delta) => {
-      // A previous Stop reply pauses the LiveKit audio element immediately.
-      // Resume it only when a fresh response actually begins arriving.
-      remoteAvatarAudio.forEach((audio) => audio.play().catch(() => {}));
-      relayAvatarAudio('audio', delta);
+      // Unmute only for a fresh reply after Stop reply or an interruption.
+      liveAvatar.audio(delta);
     },
-    onAssistantAudioFlush: () => relayAvatarAudio('flush'),
+    onAssistantAudioFlush: () => liveAvatar.flush(),
     onAssistantAudioClear: () => {
-      // Stop local playback at once while the relay clears any audio not yet
-      // handed to Higgs. The session and avatar video stay connected.
-      remoteAvatarAudio.forEach((audio) => audio.pause());
-      relayAvatarAudio('clear');
+      // Silence the interrupted reply without pausing the shared media
+      // element: pausing it would freeze the face and break A/V timing.
+      liveAvatar.clear();
     },
     onAgentAudioEnd: () => {
       if (els.avatar.dataset.state === 'speaking') els.avatar.dataset.state = 'listening';
@@ -601,7 +513,7 @@ async function exportStudyPack() {
 async function stopSession() {
   sessionStartSerial++;
   clearInterval(tickTimer); tickTimer = null;
-  const hadAvatar = Boolean(liveAvatarSession);
+  const hadAvatar = liveAvatar.active;
   if (looper) { looper.stop(); looper = null; }
   await stopLiveAvatar();
   if (hadAvatar) els.avatarSetupNote.textContent = 'Avatar disconnected. Start a new session when you are ready.';
@@ -673,7 +585,7 @@ els.buildPack.addEventListener('click', buildStudyPack);
 els.exportPack.addEventListener('click', exportStudyPack);
 window.addEventListener('pagehide', () => {
   try { looper?.stop(); } catch {}
-  const sessionId = liveAvatarSession?.session_id;
+  const sessionId = liveAvatar.sessionId;
   if (sessionId) {
     fetch(`/api/live-avatar/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE', keepalive: true,
