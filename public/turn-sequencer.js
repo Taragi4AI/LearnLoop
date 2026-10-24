@@ -44,10 +44,10 @@ export function createTurnSequencer({ fetchContext, inject, requestResponse, onE
       trace.push({ step: 'context_retrieved', turnId });
     } catch (err) {
       trace.push({ step: 'context_failed', turnId });
-      onError && onError('context_fetch_failed', err);
+      onError && onError('context_fetch_failed', err, { turnId, lectureId });
       // Do NOT silently claim context applied. Still answer, but mark ungrounded.
       try { await requestResponse({ turnId, grounded: false }); trace.push({ step: 'response_requested_ungrounded', turnId }); }
-      catch (e2) { onError && onError('response_failed', e2); }
+      catch (e2) { onError && onError('response_failed', e2, { turnId, lectureId }); }
       inflight.delete(turnId);
       return trace;
     }

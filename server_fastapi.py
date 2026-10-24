@@ -39,6 +39,8 @@ BASE_DIR = Path(__file__).parent
 PUBLIC_DIR = BASE_DIR / "public"
 PORT = int(os.environ.get("PORT", "3000"))
 API_BASE = os.environ.get("BOSON_API_BASE", "https://api.boson.ai/v1")
+AVATAR_REFERENCE_PATH = BASE_DIR / "image.png"
+MAX_AVATAR_REFERENCE_BYTES = 10 * 1024 * 1024
 
 
 def _load_dotenv() -> None:
@@ -121,6 +123,17 @@ app = FastAPI(title="LearnLoop backend (Boson proxy)")
 @app.get("/api/health")
 async def health():
     return {"ok": True, "keyConfigured": bool(API_KEY), "apiBase": API_BASE}
+
+
+@app.get("/api/walkthrough/avatar-reference")
+async def walkthrough_avatar_reference():
+    """Return the fixed, user-supplied Calm Walkthrough image read-only."""
+    try:
+        if not AVATAR_REFERENCE_PATH.is_file() or AVATAR_REFERENCE_PATH.stat().st_size > MAX_AVATAR_REFERENCE_BYTES:
+            return JSONResponse(status_code=500, content={"error": {"message": "Avatar reference image is unavailable or exceeds 10 MB."}})
+    except OSError:
+        return JSONResponse(status_code=404, content={"error": {"message": "Avatar reference image is unavailable."}})
+    return FileResponse(AVATAR_REFERENCE_PATH, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +420,7 @@ async def lecture_transcript(video_id: str):
         return JSONResponse(status_code=404, content={"error": {"message": "No such lecture"}})
     segs = s.get_segments(video_id)
     return {"video_id": video_id, "count": len(segs),
-            "segments": [{"seq": x.seq, "start": x.start_time, "end": x.end_time, "text": x.text}
+            "segments": [{"id": x.id, "seq": x.seq, "start": x.start_time, "end": x.end_time, "text": x.text}
                          for x in segs]}
 
 
@@ -587,6 +600,7 @@ def _bad_json() -> JSONResponse:
 # Static frontend (mounted last so /api/* takes precedence).
 # html=True serves index.html at "/".
 # ---------------------------------------------------------------------------
+app.mount("/vendor/mermaid", StaticFiles(directory=str(BASE_DIR / "node_modules" / "mermaid" / "dist")), name="mermaid")
 app.mount("/", StaticFiles(directory=str(PUBLIC_DIR), html=True), name="static")
 
 

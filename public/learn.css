@@ -112,6 +112,16 @@
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   height: 100%; display: flex; flex-direction: column; overflow: hidden;
 }
+.ws-right { position: relative; }
+.chat-resize-handle {
+  position: absolute; z-index: 4; inset: 0 auto 0 0; width: 10px;
+  cursor: col-resize; touch-action: none;
+}
+.chat-resize-handle::after {
+  content: ''; position: absolute; left: 3px; top: 32%; bottom: 32%; width: 3px;
+  border-radius: 4px; background: transparent; transition: background var(--mo-fast) var(--ease-out);
+}
+.chat-resize-handle:hover::after, .chat-resize-handle:focus-visible::after { background: var(--accent); }
 .rail-head {
   display: flex; align-items: center; gap: 8px; padding: 12px 14px;
   border-bottom: 1px solid var(--border); flex: 0 0 auto;
@@ -191,6 +201,7 @@
 .ws-right .looper-convo { flex: 1 1 auto; min-height: 160px; display: flex; flex-direction: column; margin-top: 0; border-top: none; padding-top: 0; overflow: hidden; }
 .ws-right .convo-head { flex: 0 0 auto; }
 .ws-right .convo-head #rtExport { margin-left: auto; }
+.ws-right .looper-convo .cue-card-strip { margin: 0 0 10px; }
 /* The scroll container holds the log + a bottom sentinel + the floating
    Jump-to-latest button. It is the ONLY thing that scrolls (not the page).
    The flex:1 1 0 chain bounds it when the rail has a real height; the vh
@@ -369,6 +380,29 @@
 
 /* Transcript search panel (G2.3) */
 .transcript-panel { margin-top: 18px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.csp-panel { margin-top: 18px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.csp-page-main { max-width: 980px; margin: 0 auto; padding-bottom: 36px; }
+.csp-page-main .csp-panel { margin-top: 24px; }
+.csp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.csp-head p { margin: 4px 0 0; }
+.csp-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.csp-section h3, .csp-section h4 { margin: 0 0 9px; }
+.csp-section h4 { font-size: .95rem; }
+.csp-item { margin: 9px 0; padding: 10px; border: 1px solid var(--border); border-radius: 9px; background: rgba(237, 243, 251, .45); }
+.csp-item p { margin: 0 0 7px; }
+.csp-evidence { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: .84rem; }
+.csp-citation-id { color: var(--muted); overflow-wrap: anywhere; }
+.csp-source { border: 0; padding: 0; color: var(--accent); background: transparent; text-decoration: underline; cursor: pointer; font: inherit; font-weight: 650; }
+.csp-source-label { color: var(--muted); font-size: .86rem; font-weight: 650; }
+.csp-choices { display: grid; gap: 6px; margin: 9px 0; }
+.csp-choices .ctl { text-align: left; height: auto; white-space: normal; }
+.csp-short-answer { max-width: 360px; margin: 4px 7px 4px 0; }
+.csp-feedback { margin: 9px 0; padding: 8px; border-radius: 7px; }
+.csp-feedback.ok { background: #e7f5ea; }
+.csp-feedback.err { background: #fff0ee; }
+.csp-failure { margin: 8px 0; padding: 9px; border-radius: 8px; background: #fff7ed; }
+.csp-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.csp-review.reviewed { opacity: .68; }
 .tp-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 8px; }
 .tp-head .err { color: var(--bad); }
 .tp-process { margin-bottom: 10px; }
@@ -514,6 +548,52 @@
 .convo-row.looper.interrupted { border-color: var(--warn); }
 .convo-row.looper.interrupted::after { content: ' — interrupted'; color: var(--warn); font-size: 11px; font-style: italic; }
 
+/* Calm Walkthrough — temporary, answer-scoped companion card. The diagram is
+   intentionally quiet and compact so the streamed explanation remains primary. */
+.calm-walkthrough {
+  display: grid; gap: 10px; margin-top: 10px; padding: 11px;
+  border: 1px solid #c7d6ee; border-radius: 9px; background: #f8fbff;
+  white-space: normal;
+}
+.calm-walkthrough-link {
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; color: var(--accent);
+  font-size: 12px; font-weight: 700; text-decoration: underline; cursor: pointer;
+}
+.calm-walkthrough-link:hover { color: #203e68; }
+.calm-walkthrough-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); }
+.calm-walkthrough-tag { padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; }
+.calm-diagram { min-height: 0; overflow-x: auto; border-radius: 7px; background: #fff; }
+.calm-diagram.ready { padding: 6px; border: 1px solid #dbe5f2; }
+.calm-diagram svg { display: block; min-width: 360px; max-width: 100%; height: auto; margin: 0 auto; }
+.calm-diagram-fallback { padding: 8px 9px; border-left: 3px solid var(--warn); background: #fffaf1; color: #685128; font-size: 12px; line-height: 1.4; }
+.calm-sources { display: grid; gap: 6px; color: var(--text); font-size: 12px; }
+.calm-sources > strong { font-size: 12px; }
+.calm-sources .muted { margin: 0; }
+.calm-source { display: inline-flex; padding: 3px 7px; border-left: 2px solid #9cb4d3; background: #fff; border-radius: 0 6px 6px 0; line-height: 1.38; }
+.calm-source-seek { justify-self: start; border: 0; padding: 0; background: transparent; color: var(--accent); text-decoration: underline; font: inherit; font-weight: 650; cursor: pointer; }
+.calm-source-seek:hover { color: #203e68; }
+.calm-video { display: grid; gap: 7px; padding-top: 8px; border-top: 1px dashed #c7d6ee; }
+.calm-video-note { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.35; }
+.calm-video-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.calm-dismiss { padding: 4px 7px; font-size: 12px; }
+.calm-video-status { color: var(--muted); font-size: 12px; }
+.calm-video-player { width: 100%; max-height: 260px; border-radius: 7px; background: #111; }
+
+/* Full-size, answer-scoped presentation keeps diagrams and optional video out
+   of the narrow conversation rail without losing their validated sources. */
+.walkthrough-dialog {
+  width: min(880px, calc(100vw - 32px)); max-height: min(88vh, 900px); margin: auto;
+  padding: 0; border: 0; border-radius: 14px; background: var(--panel); color: var(--text);
+  box-shadow: 0 24px 80px rgba(20, 37, 62, .32);
+}
+.walkthrough-dialog::backdrop { background: rgba(20, 37, 62, .48); }
+.walkthrough-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 18px; border-bottom: 1px solid var(--border); }
+.walkthrough-dialog-head h2 { margin: 0; font-size: 18px; }
+.walkthrough-dialog-body { max-height: calc(min(88vh, 900px) - 66px); overflow: auto; padding: 18px; }
+.walkthrough-dialog .calm-walkthrough { margin: 0; max-width: none; }
+.walkthrough-dialog .calm-diagram svg { min-width: 0; width: 100%; }
+.walkthrough-dialog .calm-video-player { max-height: min(54vh, 520px); }
+
 /* Looper responsiveness indicators. All are small, contained to the convo head,
    and never move the video. Driven by data-speaking / data-thinking on the head. */
 
@@ -601,6 +681,7 @@
   /* Bound the SCROLL container (not .convo-log) so the chat actually scrolls
      when the rail has auto height on laptops — issue 5 root cause. */
   .ws-right .convo-scroll { max-height: 300px; }
+  .chat-resize-handle { display: none; }
 }
 
 /* Below ~820px: single column. Left rail collapses above the content;    */

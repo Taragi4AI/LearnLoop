@@ -17,6 +17,23 @@ import { createLooperSession } from './looper-realtime.js';
 import { createTurnSequencer } from './turn-sequencer.js';
 import { shouldApplyResponseEvent, reconcileFinalText, autoScrollDecision } from './chat-stream.js';
 import { isStopListeningCommand, createDisabledMultiSpeakerDetector } from './voice-session.js';
+import { createSessionCsp } from './session-csp.js';
+import mermaid from '/vendor/mermaid/mermaid.esm.min.mjs';
+
+// Diagrams are rendered locally from a small, validated DSL assembled below.
+// Mermaid never receives model-provided HTML/JS, and strict mode disables HTML
+// labels and interactive links in the generated SVG.
+mermaid.initialize({
+  startOnLoad: false,
+  securityLevel: 'strict',
+  deterministicIds: true,
+  flowchart: { htmlLabels: false, useMaxWidth: true, curve: 'basis' },
+  theme: 'base',
+  themeVariables: {
+    primaryColor: '#edf3fb', primaryTextColor: '#1f2d3d', primaryBorderColor: '#6c8bb5',
+    lineColor: '#6c8bb5', fontFamily: 'system-ui, -apple-system, Segoe UI, sans-serif',
+  },
+});
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -43,6 +60,14 @@ const els = {
 const player = createPlayerController(els.video);
 let currentObjectUrl = null;
 let seeking = false;
+let lectureSessionGeneration = 0; // invalidates upload completions after a switch/close
+// The CSP owns only in-memory state. It receives validated transcript records
+// already loaded by this page and always replays through seekPlayer below.
+const csp = createSessionCsp({
+  seek: (timestamp) => seekPlayer(timestamp),
+  formatTime,
+  isActiveLecture: (lectureId) => lectureId === currentVideoId,
+});
 
 // ---- Key status banner (reuses the M0 /api/health route) ----
 async function checkHealth() {
@@ -103,6 +128,9 @@ function handleFile(file) {
 }
 
 function loadLecture(file) {
+  const generation = ++lectureSessionGeneration;
+  clearCalmWalkthrough('lecture_change');
+  latestAssistantAnswer = null;
   // Revoke any previous URL to avoid leaks.
   if (currentObjectUrl) { URL.revokeObjectURL(currentObjectUrl); currentObjectUrl = null; }
 
@@ -117,10 +145,14 @@ function loadLecture(file) {
   els.video.load();
 
   // Automatically upload + start processing (no second manual action).
-  autoProcess(file);
+  autoProcess(file, generation);
 }
 
 function closeLecture() {
+  lectureSessionGeneration++;
+  clearCalmWalkthrough('lecture_closed');
+  latestAssistantAnswer = null;
+  csp.clear();
   try { els.video.pause(); } catch {}
   els.video.removeAttribute('src');
   els.video.load();
@@ -330,18 +362,13 @@ function describeMediaError(err) {
 }
 
 // ---------------------------------------------------------------------------
-// Looper voice — G3.1: local wake-word detection only (no Realtime yet).
-// Explicit enable/disable; local-only; on detection, show an unmistakable
-// activated state and pause the video. Mic audio is NOT streamed anywhere.
+// Looper voice — the browser-local wake-word detector gates Higgs Realtime.
+// Higgs is never connected while the detector is passively listening.
 // ---------------------------------------------------------------------------
 const ww = {
   toggle: $('#wwToggle'),
-  manual: $('#wwManual'),
   state: $('#wwState'),
   hint: $('#wwHint'),
-  meter: $('#wwMeter'),
-  score: $('#wwScore'),
-  activated: $('#wwActivated'),
   convo: $('#looperConvo'),
   rtState: $('#rtState'),
   rtStop: $('#rtStop'),
@@ -352,20 +379,31 @@ const ww = {
 // ---- Looper live conversation (G3.2) ----
 const RT_LABEL = {
   idle: 'idle', connecting: 'connecting…', live: 'listening',
-  speaking: 'Jarvis speaking', closed: 'stopped', error: 'error',
+  speaking: 'Jarvis speaking', paused: 'wake word listening', closed: 'stopped', error: 'error',
 };
 let rtActive = false;
 let assistantBubble = null;
 let userBubble = null;        // provisional/finalized user bubble for the current turn
 let activeResponseId = null;  // id of the response currently streaming (stale-event guard)
-let userStoppedExplicitly = false;
-// A detector owns the same physical microphone as the Realtime session. Keep
-// its asynchronous shutdown in one place so we never re-open it mid-teardown.
 let wakeWordTeardown = Promise.resolve();
+let wakeWordDesired = false;
+let wakeWordOn = false;
 
 function disableWakeWord() {
   wakeWordTeardown = Promise.resolve(wakeword.disable()).catch(() => {});
   return wakeWordTeardown;
+}
+
+function rearmWakeWord() {
+  wakeWordDesired = true;
+  ww.state.dataset.s = 'starting';
+  ww.state.textContent = 'Re-arming wake word…';
+  ww.toggle.disabled = true;
+  // Higgs has released its microphone input track. Give the browser a short
+  // hand-off window before the local detector requests that same device.
+  setTimeout(() => {
+    if (!rtActive && wakeWordDesired && !wakeWordOn) wakeword.enable();
+  }, 150);
 }
 
 const multiSpeakerDetector = createDisabledMultiSpeakerDetector({
@@ -412,10 +450,108 @@ function exportConvoLog() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// Calm Walkthrough is driven only by completed transcription text. Its
+// evidence is the structured response from the existing lecture-context route;
+// free-form assistant timestamps are never used as citations or seek targets.
+const CALM_WALKTHROUGH_PATTERNS = [
+  /\b(?:re[-\s]?explain|explain(?:\s+(?:this|that|it|better))?|clarify|make\s+(?:this|that|it)\s+clearer)\b/i,
+  /\b(?:break\s+(?:this|that|it)\s+down|walk\s+me\s+through|calm\s+walkthrough)\b/i,
+  /\b(?:in\s+simple\s+(?:words|way)|simple\s+(?:words|way))\b/i,
+  /\b(?:simple|asan|aasan)\s+(?:way|tarike|tareeke)\s+(?:mein|me)\s+(?:samjha(?:o|do)?|explain)\b/i,
+  /\bthoda\s+aur\s+(?:explain|samjha(?:o|do)?)\b/i,
+  /\b(?:explain|samjha(?:o|do)?)\s+karo\b/i,
+];
+const WALKTHROUGH_MAX_CITATIONS = 4;
+const WALKTHROUGH_MAX_DIAGRAM_CHARS = 2200;
+let walkthroughSerial = 0;
+let calmWalkthrough = null;
+let latestAssistantAnswer = null;
+
+function wantsCalmWalkthrough(finalTranscript) {
+  const text = String(finalTranscript || '').replace(/\s+/g, ' ').trim();
+  return text.length > 1 && CALM_WALKTHROUGH_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function beginCalmWalkthrough(question, lectureId, turnId) {
+  if (!wantsCalmWalkthrough(question)) return null;
+  const request = {
+    id: `calm-${++walkthroughSerial}`,
+    lectureId: lectureId || null, turnId, question: String(question || ''),
+    evidence: [], evidenceReady: false,
+    answerRow: null, answerText: '', card: null, link: null,
+    objectUrls: [], videoGeneration: 0, videoGenerating: false,
+  };
+  calmWalkthrough = request;
+  if (latestAssistantAnswer?.lectureId === request.lectureId) {
+    request.answerRow = latestAssistantAnswer.row;
+    request.answerText = latestAssistantAnswer.text;
+  }
+  return request;
+}
+
+function clearCalmWalkthrough(reason = 'reset') {
+  const request = calmWalkthrough;
+  if (!request) return;
+  // A video job is server-side and should keep being tracked when the learner
+  // begins a follow-up turn. Dismissal, interruption, lecture changes, and
+  // session shutdown still detach its temporary UI immediately.
+  if (reason === 'next_learner_turn' && request.videoGenerating) return;
+  calmWalkthrough = null;
+  request.videoGeneration += 1;
+  for (const url of request.objectUrls || []) { try { URL.revokeObjectURL(url); } catch {} }
+  request.objectUrls = [];
+  request.link?.remove();
+  if (walkthroughDialog?.open && walkthroughDialogBody?.contains(request.card)) walkthroughDialog.close();
+  request.card?.remove();
+  logEvent('calm_walkthrough_cleared', { reason });
+}
+
+function validateWalkthroughEvidence(data, lectureId) {
+  if (!data || data.video_id !== lectureId || !Array.isArray(data.segments)) return [];
+  const seen = new Set();
+  const citations = [];
+  for (const segment of data.segments) {
+    if (citations.length >= WALKTHROUGH_MAX_CITATIONS) break;
+    const seq = Number(segment?.seq), start = Number(segment?.start), end = Number(segment?.end);
+    const text = typeof segment?.text === 'string' ? segment.text.replace(/\s+/g, ' ').trim() : '';
+    if (!Number.isInteger(seq) || seq < 0 || !Number.isFinite(start) || !Number.isFinite(end) ||
+        start < 0 || end < start || !text || text.length > 1600) continue;
+    const id = `${lectureId}:${seq}:${start.toFixed(3)}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    citations.push({ id, seq, start, end, text, kind: segment.kind === 'match' ? 'match' : 'nearby' });
+  }
+  return citations;
+}
+
+function attachWalkthroughEvidence(request, data) {
+  if (!request || calmWalkthrough !== request || request.lectureId !== currentVideoId) return;
+  request.evidence = validateWalkthroughEvidence(data, request.lectureId);
+  request.evidenceReady = true;
+  maybeRenderCalmWalkthrough(request);
+}
+
+function markWalkthroughEvidenceUnavailable(request) {
+  if (!request || calmWalkthrough !== request) return;
+  request.evidence = [];
+  request.evidenceReady = true;
+  maybeRenderCalmWalkthrough(request);
+}
+
+function attachWalkthroughAnswer(row, text) {
+  latestAssistantAnswer = row ? { row, text: String(text || ''), lectureId: currentVideoId } : null;
+  const request = calmWalkthrough;
+  if (!request || !row || request.lectureId !== currentVideoId) return;
+  request.answerRow = row;
+  request.answerText = String(text || '');
+  maybeRenderCalmWalkthrough(request);
+}
+
 // G4 race-free turn sequencer: on each user turn, fetch question-scoped context,
 // inject it, THEN request the response. Stale lecture/turn results are dropped.
 const turnSeq = createTurnSequencer({
   fetchContext: async ({ question, lectureId, position, turnId }) => {
+    const walkthroughRequest = beginCalmWalkthrough(question, lectureId, turnId);
     logEvent('context_fetch_start', { turnId, lectureId, position_s: Number(position.toFixed(2)), question });
     showCue('retrieving');   // B — lecture-context retrieval is actually running
     const qs = question ? `&q=${encodeURIComponent(question)}` : '';
@@ -431,6 +567,7 @@ const turnSeq = createTurnSequencer({
     // B — show a clickable timestamp card for the most relevant passage found,
     // or an honest "nothing found" note. Never fabricate a passage.
     showRetrievalResult(data);
+    attachWalkthroughEvidence(walkthroughRequest, data);
     return data;
   },
   inject: (ctx, { turnId } = {}) => {
@@ -445,7 +582,12 @@ const turnSeq = createTurnSequencer({
     looper.requestResponse();
     logEvent('response_requested', { turnId, grounded });
   },
-  onError: (kind) => { addConvo('system', 'Context delivery issue: ' + kind); logEvent('context_error', { kind }); flashCue('retrieving', "Couldn't reach the lecture transcript — answering from general knowledge."); },
+  onError: (kind, _error, meta) => {
+    if (calmWalkthrough?.turnId === meta?.turnId) markWalkthroughEvidenceUnavailable(calmWalkthrough);
+    addConvo('system', 'Context delivery issue: ' + kind);
+    logEvent('context_error', { kind });
+    flashCue('retrieving', "Couldn't reach the lecture transcript — answering from general knowledge.");
+  },
 });
 
 // B — render retrieval outcome: a rich clickable card (thumbnail/play +
@@ -583,6 +725,10 @@ function _dur() { return Number.isFinite(els.video.duration) ? els.video.duratio
 async function executeTool(name, args) {
   // Returns a plain object -> serialized as function_call_output. Always honest.
   switch (name) {
+    case 'end_listening_session':
+      // Higgs requested the application-owned pause. The WebSocket remains
+      // connected, but mic forwarding stops until the local wake word returns.
+      return { ok: pauseConversationForWakeWord('agent tool'), session_paused: true };
     case 'control_video': {
       const action = String(args.action || '').toLowerCase();
       const secs = Number.isFinite(args.seconds) ? Math.abs(args.seconds) : 10;
@@ -816,20 +962,63 @@ function resumeLectureAfterSpeech(reason) {
   logEvent('audio_policy', { action: 'resume_after_speech', reason, playing: player.isPlaying() });
 }
 
-// One application-owned shutdown path.  It deliberately does not touch the
-// lecture: saying stop is about Jarvis' mic/output, never video playback.
-function stopConversation(reason = 'stopped') {
+// One application-owned shutdown path. It deliberately does not touch the
+// lecture: ending the Higgs session is about its mic/output, never playback.
+function stopConversation(reason = 'stopped', { rearm = false } = {}) {
   if (!rtActive && looper.state === 'closed') return;
-  userStoppedExplicitly = true;
-  wwDesired = false;                 // never silently re-arm after a stop
+  clearCalmWalkthrough('session_end');
+  latestAssistantAnswer = null;
   rtActive = false;                  // reject queued/stale UI events immediately
   const status = reason === 'multiple-speakers'
-    ? 'Stopped listening — multiple speakers detected. Mic off.'
-    : 'Stopped listening — mic off.';
+    ? 'Higgs session ended — multiple speakers detected. Mic off.'
+    : 'Higgs session ended — mic off.';
   addConvo('system', status);
-  logEvent(reason === 'multiple-speakers' ? 'multiple_speakers_stop' : 'stop_listening_command');
+  logEvent(reason === 'multiple-speakers' ? 'multiple_speakers_stop' : 'session_ended');
+  // Let the closed-session UI settle before requesting the local microphone.
+  if (rearm) wakeWordDesired = false;
   looper.stop(reason);               // synchronously cancels output + releases Realtime mic
-  disableWakeWord();                 // defensive: it should already be released at hand-off
+  if (rearm) rearmWakeWord();
+}
+
+function pauseConversationForWakeWord(reason = 'stop command') {
+  if (!rtActive) return false;
+  clearCalmWalkthrough('session_end');
+  latestAssistantAnswer = null;
+  rtActive = false; // reject any late Higgs output while the local detector owns the mic
+  const paused = looper.pauseInput('Waiting locally for “Hey Jarvis”.');
+  if (!paused) {
+    // Preserve the reliable full-close fallback if the retained connection is
+    // already unavailable.
+    stopConversation(reason, { rearm: true });
+    return false;
+  }
+  addConvo('system', 'Stopped listening — say “Hey Jarvis” to continue.');
+  logEvent('session_input_paused', { reason });
+  rearmWakeWord();
+  return true;
+}
+
+async function resumeConversationFromWakeWord() {
+  if (rtActive) return true;
+  if (looper.state !== 'paused') {
+    startConversation();
+    return true;
+  }
+  rtActive = true;
+  ww.state.dataset.s = 'active';
+  ww.state.textContent = 'Jarvis active';
+  ww.toggle.disabled = true;
+  const resumed = await looper.resumeInput();
+  if (!resumed) {
+    rtActive = false;
+    looper.stop('resume_failed');
+    rearmWakeWord();
+    return false;
+  }
+  turnSeq.setLecture(currentVideoId);
+  refreshContextProactively('wake_word_resume');
+  logEvent('session_input_resumed', { lecture_id: currentVideoId || null });
+  return true;
 }
 
 const looper = createLooperSession({
@@ -902,6 +1091,8 @@ const looper = createLooperSession({
     const thinking = (s === 'speaking') || (/thinking/i.test(detail || ''));
     setThinkingIndicator(thinking && s !== 'closed' && s !== 'error');
     if (s === 'closed' || s === 'error') {
+      clearCalmWalkthrough(s === 'error' ? 'session_error' : 'session_end');
+      latestAssistantAnswer = null;
       rtActive = false;
       setSpeakingIndicator(false);
       setThinkingIndicator(false);
@@ -913,8 +1104,12 @@ const looper = createLooperSession({
       // "listening…" placeholder so we don't leave fabricated text behind.
       if (userBubble) { userBubble.remove(); userBubble = null; }
       if (s === 'error') addConvo('system', detail || 'error');
-      // No automatic wake-word re-arm. A new microphone capture always needs
-      // an explicit user click after a conversation has stopped.
+      if (!wakeWordDesired) {
+        ww.state.dataset.s = 'off';
+        ww.state.textContent = 'Wake word off';
+        ww.toggle.disabled = false;
+        ww.toggle.textContent = 'Enable wake word';
+      }
     }
   },
   // User finished/started speaking but the final STT transcript hasn't arrived.
@@ -922,6 +1117,8 @@ const looper = createLooperSession({
   // reusing it — never append a duplicate per event.
   onUserPending: () => {
     if (!rtActive) return;
+    clearCalmWalkthrough('next_learner_turn');
+    latestAssistantAnswer = null;
     if (!userBubble) {
       userBubble = addConvo('you', 'listening…');
       userBubble.classList.add('provisional');
@@ -934,6 +1131,10 @@ const looper = createLooperSession({
     // A WebSocket can deliver a final transcription just after the app has
     // stopped it. Never turn that late event into a fresh conversation turn.
     if (!rtActive) return;
+    // Covers providers that emit a completed transcript without a preceding
+    // speech-start callback. The activation source remains finalized words.
+    clearCalmWalkthrough('next_learner_turn');
+    latestAssistantAnswer = null;
     // Finalize the user turn: replace the provisional bubble's text in place
     // (no duplicate), or create a finalized bubble if none existed.
     if (userBubble) {
@@ -946,14 +1147,16 @@ const looper = createLooperSession({
     userBubble = null;
     assistantBubble = null;
     logEvent('user_transcript', { text: t, position_s: Number((els.video.currentTime || 0).toFixed(2)) });
-    // CONTROL PHRASE: "stop listening" (and similar) ends the conversation
-    // instead of being sent to Jarvis as a question. The user explicitly asked
-    // to stop, so we release the mic and do NOT auto-restart wake-word listening.
+    // A stop command is application-owned: end Higgs immediately and return to
+    // browser-local wake-word mode. It is never forwarded as a chat question.
     if (isStopListeningCommand(t)) {
       logEvent('stop_listening_command', { text: t });
-      stopConversation('stopped');
-      return;   // do not forward to the model or keep the Realtime mic open
+      pauseConversationForWakeWord('transcript command');
+      return;
     }
+    // Preserve substantive learner questions verbatim for this lecture's
+    // in-memory FAQ/review list; no voice or sentiment inference is used.
+    csp.recordQuestion(t);
     // Under server VAD the server auto-responds; we do NOT drive the response.
     // Grounding is kept current by proactive context injection (activation +
     // seek + turn start). We still fetch question-scoped context here as a
@@ -971,6 +1174,7 @@ const looper = createLooperSession({
   // spoken text) never leaves an empty bubble.
   onResponseStart: (responseId) => {
     if (!rtActive) return;
+    latestAssistantAnswer = null;
     activeResponseId = responseId || activeResponseId;
     assistantBubble = null;   // next delta for this id creates+keys the bubble
   },
@@ -978,6 +1182,8 @@ const looper = createLooperSession({
   // and mark it clearly as interrupted rather than silently finalizing.
   onAssistantInterrupted: (responseId) => {
     if (!rtActive) return;
+    clearCalmWalkthrough('interrupted');
+    latestAssistantAnswer = null;
     const b = bubbleForResponse(responseId);
     if (b) {
       b.classList.remove('streaming');
@@ -1004,6 +1210,7 @@ const looper = createLooperSession({
         if (reconciled != null) { setConvoText(b, reconciled); maybeAutoScroll(); }
         b.classList.remove('streaming');
         logEvent('assistant_transcript', { text: b._raw || '' });
+        attachWalkthroughAnswer(b, b._raw || '');
       }
       assistantBubble = null;
       setSpeakingIndicator(false);
@@ -1253,9 +1460,281 @@ function appendConvoDelta(row, delta) {
   maybeAutoScroll();   // keep the streaming message visible if following the bottom
 }
 
+// ---- Calm Walkthrough card -------------------------------------------------
+// The assistant's text remains the primary answer. This companion card is
+// built after the answer from the same validated context data; it does not ask
+// another model to create diagram markup or citations.
+function maybeRenderCalmWalkthrough(request) {
+  if (!request || calmWalkthrough !== request || request.card || !request.answerRow ||
+      !request.evidenceReady || request.lectureId !== currentVideoId) return;
+
+  const card = el('section', { className: 'calm-walkthrough', 'aria-label': 'Calm walkthrough' });
+  request.card = card;
+  const head = el('div', { className: 'calm-walkthrough-head' });
+  head.append(el('strong', { textContent: 'Calm walkthrough' }));
+  head.append(el('span', { className: 'calm-walkthrough-tag', textContent: 'Beginner-friendly' }));
+  card.append(head);
+
+  const diagram = el('div', { className: 'calm-diagram', role: 'img', 'aria-label': 'Lecture evidence diagram' });
+  const fallback = el('div', { className: 'calm-diagram-fallback hidden' });
+  card.append(diagram, fallback);
+
+  const sources = el('div', { className: 'calm-sources' });
+  sources.append(el('strong', { textContent: request.evidence.length ? 'Validated lecture sources' : 'Background only' }));
+  if (!request.evidence.length) {
+    sources.append(el('p', { className: 'muted', textContent: 'No validated lecture passage was available for this answer. The explanation above is general background.' }));
+    showWalkthroughFallback(fallback, 'A safe Mermaid diagram needs at least two validated lecture passages.');
+  } else {
+    request.evidence.forEach((citation, index) => sources.append(createWalkthroughCitation(request, citation, index)));
+    if (request.evidence.length < 2) {
+      showWalkthroughFallback(fallback, 'Only one validated lecture passage was available, so a relationship diagram would be misleading.');
+    } else {
+      renderWalkthroughMermaid(request, diagram, fallback);
+    }
+  }
+  card.append(sources, createWalkthroughVideoControls(request));
+  const link = el('a', {
+    className: 'calm-walkthrough-link', href: '#calm-walkthrough',
+    textContent: 'Open Calm Walkthrough ↗',
+    'aria-label': 'Open the full Calm Walkthrough',
+  });
+  link.addEventListener('click', (event) => {
+    event.preventDefault();
+    openCalmWalkthrough(request);
+  });
+  request.link = link;
+  request.answerRow.append(link);
+  walkthroughDialogBody?.replaceChildren(card);
+  maybeAutoScroll();
+}
+
+const walkthroughDialog = $('#walkthroughDialog');
+const walkthroughDialogBody = $('#walkthroughDialogBody');
+
+function openCalmWalkthrough(request) {
+  if (!request || calmWalkthrough !== request || request.lectureId !== currentVideoId ||
+      !request.card?.isConnected || !walkthroughDialog) return;
+  walkthroughDialogBody?.replaceChildren(request.card);
+  if (typeof walkthroughDialog.showModal === 'function') {
+    if (!walkthroughDialog.open) walkthroughDialog.showModal();
+  } else {
+    walkthroughDialog.setAttribute('open', '');
+  }
+}
+
+$('#walkthroughDialogClose')?.addEventListener('click', () => walkthroughDialog?.close());
+
+function createWalkthroughCitation(request, citation, index) {
+  const item = el('div', { className: 'calm-source' });
+  const seek = el('button', {
+    className: 'calm-source-seek', type: 'button',
+    textContent: `${index + 1}. Source · ${formatTime(citation.start)}`,
+    'aria-label': `Replay source ${index + 1} at ${formatTime(citation.start)}: ${citation.text}`,
+    title: citation.text,
+  });
+  seek.addEventListener('click', () => {
+    const stillValidated = request.lectureId === currentVideoId && request.card?.isConnected &&
+      request.evidence.some((saved) => saved.id === citation.id && saved.start === citation.start);
+    if (!stillValidated) return;
+    logEvent('calm_walkthrough_source_replay', { citation_id: citation.id, start: citation.start });
+    seekPlayer(citation.start);
+  });
+  item.append(seek);
+  return item;
+}
+
+function walkthroughDiagramSteps(answerText) {
+  // The model's displayed walkthrough is the learner-facing explanation. Turn
+  // its short, ordered sentences into data-only labels; never accept Mermaid
+  // syntax or HTML from the model.
+  return String(answerText || '')
+    .replace(/\s+/g, ' ').trim()
+    .split(/(?<=[.!?])\s+/)
+    .map((step) => step.trim())
+    .filter((step) => step.length >= 12)
+    .slice(0, WALKTHROUGH_MAX_CITATIONS);
+}
+
+function walkthroughConceptLabel(request) {
+  // Prefer the learner's own subject words. If they only said “explain this”,
+  // fall back to the first cited lecture phrase rather than guessing a topic.
+  const subject = String(request?.question || '')
+    .replace(/\b(?:can you|could you|please|explain|re[-\s]?explain|break(?:\s+it|\s+that|\s+this)?\s+down|walk\s+me\s+through|give\s+me|a|an|the|in|a\s+simple\s+way|simple\s+way|calm\s+walkthrough|like\s+a\s+baby|slowly|better|this|that|it|me)\b/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+  const fallback = String(request?.evidence?.[0]?.text || '').split(/[.,;:]/)[0].trim();
+  return (subject || fallback || 'Lecture concept').slice(0, 64);
+}
+
+function safeMermaidLabel(step, index) {
+  const excerpt = String(step || '').slice(0, 86)
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s.,!?+\-/]/gu, '')
+    .replace(/\s+/g, ' ').trim();
+  return `${index + 1}. ${excerpt}`;
+}
+
+function walkthroughMermaidDefinition(request) {
+  if (!request?.evidence?.length) return null;
+  const steps = walkthroughDiagramSteps(request.answerText);
+  if (steps.length < 2) return null;
+  // Mermaid concept map: the requested topic is the center, while each branch
+  // comes directly from a displayed explanation step. This works across
+  // subject matter without inventing values for a chart.
+  const lines = ['flowchart TD', `C(["${safeMermaidLabel(walkthroughConceptLabel(request), 0)}"])`];
+  steps.forEach((step, index) => lines.push(`C --> S${index}["${safeMermaidLabel(step, index + 1)}"]`));
+  const definition = lines.join('\n');
+  return definition.length <= WALKTHROUGH_MAX_DIAGRAM_CHARS ? definition : null;
+}
+
+function safeMermaidSvg(svgText) {
+  if (typeof svgText !== 'string' || svgText.length > 160000) return null;
+  const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+  const root = doc.documentElement;
+  if (!root || root.nodeName.toLowerCase() !== 'svg' || doc.querySelector('parsererror, script, iframe, object, embed')) return null;
+  for (const node of root.querySelectorAll('*')) {
+    for (const attr of node.attributes) {
+      const name = attr.name.toLowerCase(), value = attr.value.trim().toLowerCase();
+      if (name.startsWith('on') || (name.endsWith('href') && !value.startsWith('#'))) node.removeAttribute(attr.name);
+    }
+  }
+  return document.importNode(root, true);
+}
+
+async function renderWalkthroughMermaid(request, target, fallback) {
+  const definition = walkthroughMermaidDefinition(request);
+  if (!definition) {
+    showWalkthroughFallback(fallback, 'This explanation is too short to form a safe diagram. Review the validated sources below.');
+    return;
+  }
+  try {
+    await mermaid.parse(definition);
+    const rendered = await mermaid.render(`walkthrough-${request.id}`, definition);
+    if (calmWalkthrough !== request || request.lectureId !== currentVideoId || !target.isConnected) return;
+    const safeSvg = safeMermaidSvg(rendered.svg);
+    if (!safeSvg) throw new Error('Unsafe Mermaid output');
+    target.replaceChildren(safeSvg);
+    target.classList.add('ready');
+  } catch (err) {
+    if (calmWalkthrough === request && target.isConnected) {
+      showWalkthroughFallback(fallback, 'The diagram could not be rendered. Review the numbered lecture sources below.');
+      logEvent('calm_walkthrough_diagram_failed', { error: String(err?.message || err) });
+    }
+  }
+}
+
+function showWalkthroughFallback(node, message) {
+  if (!node) return;
+  node.textContent = message;
+  node.classList.remove('hidden');
+}
+
+function conciseWalkthroughScript(text) {
+  const words = String(text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  const selected = words.slice(0, 48).join(' ');
+  if (words.length >= 26) return selected.replace(/[,:;]+$/g, '.') || selected;
+  // 28–48 spoken words is roughly a 10–20 second generated-voice clip. The
+  // added sentence is process guidance, not a new lecture claim.
+  return `${selected}${selected ? ' ' : ''}Let’s take it slowly, one small idea at a time. You can replay the lecture sources whenever you want. Pause here if you need a moment, then return to the next small idea.`.trim();
+}
+
+function blobToDataUri(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('Could not read the avatar reference image.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function getWalkthroughAvatarReference() {
+  const res = await fetch('/api/walkthrough/avatar-reference', { cache: 'no-store' });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail?.error?.message || 'Avatar reference image is unavailable.');
+  }
+  const blob = await res.blob();
+  if (blob.type !== 'image/png' || !blob.size || blob.size > 10 * 1024 * 1024) {
+    throw new Error('The Avatar reference must be a PNG no larger than 10 MB.');
+  }
+  return blobToDataUri(blob);
+}
+
+function createWalkthroughVideoControls(request) {
+  const area = el('div', { className: 'calm-video' });
+  const note = el('p', { className: 'calm-video-note', textContent: 'Optional AI-generated guidance with a generated voice. It is not the lecturer or the person in the reference image.' });
+  const actions = el('div', { className: 'calm-video-actions' });
+  const make = el('button', { className: 'ctl small', type: 'button', textContent: 'Make a calm walkthrough' });
+  const dismiss = el('button', { className: 'ghost calm-dismiss', type: 'button', textContent: 'Dismiss' });
+  const status = el('span', { className: 'calm-video-status', role: 'status' });
+  actions.append(make, dismiss, status);
+  area.append(note, actions);
+  dismiss.addEventListener('click', () => clearCalmWalkthrough('dismissed'));
+  make.addEventListener('click', () => createWalkthroughVideo(request, { make, status, area }));
+  return area;
+}
+
+async function createWalkthroughVideo(request, controls) {
+  if (request.lectureId !== currentVideoId || !request.card?.isConnected) return;
+  const generation = ++request.videoGeneration;
+  request.videoGenerating = true;
+  controls.make.disabled = true;
+  controls.status.textContent = 'Preparing AI-generated video…';
+  try {
+    const refImage = await getWalkthroughAvatarReference();
+    if (request.lectureId !== currentVideoId || !request.card?.isConnected || generation !== request.videoGeneration) return;
+    const response = await fetch('/api/videos', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'higgs-avatar', ref_image: refImage, size: '480x640',
+        input_tts: { model: 'higgs-tts-3', input: conciseWalkthroughScript(request.answerText), voice: 'default' },
+      }),
+    });
+    const job = await response.json();
+    if (!response.ok || !job?.id) throw new Error(job?.error?.message || 'Could not create the video job.');
+    let status = job.status;
+    let attempts = 0;
+    while (status === 'queued' || status === 'in_progress') {
+      if (request.lectureId !== currentVideoId || !request.card?.isConnected || generation !== request.videoGeneration) return;
+      controls.status.textContent = status === 'queued' ? 'Video queued…' : 'Generating video…';
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const poll = await fetch(`/api/videos/${encodeURIComponent(job.id)}`);
+      const update = await poll.json();
+      if (!poll.ok) throw new Error(update?.error?.message || 'Could not check video status.');
+      status = update.status;
+      if (status === 'failed') throw new Error(update.error || 'Video generation failed.');
+      if (++attempts > 72) throw new Error('Video generation is taking too long. Please retry.');
+    }
+    if (status !== 'completed' && status !== 'succeeded') throw new Error('Video job did not complete.');
+    const videoResponse = await fetch(`/api/videos/${encodeURIComponent(job.id)}/content`);
+    if (!videoResponse.ok) {
+      const detail = await videoResponse.json().catch(() => ({}));
+      throw new Error(detail?.error?.message || 'Could not download the finished video.');
+    }
+    const blob = await videoResponse.blob();
+    if (request.lectureId !== currentVideoId || !request.card?.isConnected || generation !== request.videoGeneration) return;
+    const url = URL.createObjectURL(blob);
+    request.objectUrls.push(url);
+    const video = el('video', { className: 'calm-video-player', controls: true, preload: 'metadata', playsinline: true, src: url });
+    controls.area.append(video);
+    controls.status.textContent = 'Video ready';
+    logEvent('calm_walkthrough_video_ready', { job_id: job.id });
+  } catch (err) {
+    if (!request.card?.isConnected || generation !== request.videoGeneration) return;
+    controls.status.textContent = 'Video failed. Retry when ready.';
+    controls.make.disabled = false;
+    controls.make.textContent = 'Retry calm walkthrough';
+    logEvent('calm_walkthrough_video_failed', { error: String(err?.message || err) });
+  } finally {
+    if (generation === request.videoGeneration) request.videoGenerating = false;
+  }
+}
+
 function startConversation() {
   if (rtActive) return;              // ignore duplicate activations
   rtActive = true;
+  ww.state.dataset.s = 'active';
+  ww.state.textContent = 'Jarvis active';
+  ww.toggle.disabled = true;
   ww.rtLog.innerHTML = '';
   assistantBubble = null;
   userBubble = null;
@@ -1271,64 +1750,53 @@ function startConversation() {
 }
 
 ww.rtStop.addEventListener('click', () => {
-  logEvent('user_stop');
+  logEvent('user_end_session');
+  wakeWordDesired = false;
   stopConversation('stopped');
 });
 ww.rtExport.addEventListener('click', exportConvoLog);
-const WW_LABEL = {
+
+const WAKE_WORD_LABEL = {
   off: 'Wake word off', starting: 'Starting…',
-  listening: 'Listening locally', activated: 'Activated!', error: 'Error',
+  listening: 'Listening locally', activated: 'Wake word heard', error: 'Wake-word error',
 };
-let wwOn = false;
 
 const wakeword = createWakeWordListener({
-  onState: (s, detail) => {
-    ww.state.dataset.s = s;
-    ww.state.textContent = WW_LABEL[s] || s;
+  onState: (state, detail) => {
+    wakeWordOn = !(state === 'off' || state === 'error');
+    if (rtActive) return; // Higgs owns the microphone during an active session.
+    ww.state.dataset.s = state;
+    ww.state.textContent = WAKE_WORD_LABEL[state] || state;
     if (detail) ww.hint.textContent = detail;
-    ww.toggle.textContent = (s === 'off' || s === 'error') ? 'Wake word' : 'Wake word: on';
-    wwOn = !(s === 'off' || s === 'error');
-    if (s !== 'activated') ww.activated?.classList.add('hidden');   // banner removed in the rail layout → null-safe
-  },
-  onLevel: (rms) => { ww.meter.style.width = Math.min(100, Math.round(rms * 400)) + '%'; },
-  onScore: (s) => {
-    // Live wake-word model score (0..1). Lets you see sensitivity without DevTools.
-    ww.score.textContent = 'score ' + s.toFixed(3);
-    ww.meter.style.width = Math.min(100, Math.round(s * 100)) + '%';
-    ww.meter.style.background = s > 0.3 ? '#7ee0a2' : '#6ea8fe';
+    ww.toggle.disabled = state === 'starting' || state === 'activated';
+    ww.toggle.textContent = wakeWordOn ? 'Disable wake word' : 'Enable wake word';
   },
   onDetect: () => {
-    // Release local-only wake-word capture BEFORE opening the Realtime mic.
-    // Detection itself never changes lecture playback.
-    ww.activated?.classList.remove('hidden');   // null-safe: banner removed in rail layout
-    wwDesired = false;
-    disableWakeWord().finally(() => {
-      ww.activated?.classList.add('hidden');
-      startConversation();
+    // Stop the local audio pipeline before Higgs requests the microphone. If a
+    // session was only paused, resume its existing socket instead of reconnecting.
+    disableWakeWord().finally(async () => {
+      if (wakeWordDesired && !rtActive) await resumeConversationFromWakeWord();
     });
   },
 });
 
-let wwDesired = false;   // explicit wake-word arm state; cleared at hand-off/stop
 ww.toggle.addEventListener('click', () => {
-  if (wwOn) { wwDesired = false; disableWakeWord(); }
-  else { wwDesired = true; wakeword.enable(); }
+  if (rtActive) return;
+  if (wakeWordOn) {
+    wakeWordDesired = false;
+    disableWakeWord();
+  } else {
+    wakeWordDesired = true;
+    wakeword.enable();
+  }
 });
-// Development-only manual trigger. It is intentionally absent from normal UI;
-// production sessions begin exclusively after the local "Hey Jarvis" detector.
-const debugManualVoice = new URLSearchParams(window.location.search).has('debugVoice')
-  || window.__LL_DEBUG_VOICE_MANUAL === true;
-if (debugManualVoice && ww.manual) {
-  ww.manual.hidden = false;
-  ww.manual.addEventListener('click', () => {
-    if (rtActive) return;
-    wwDesired = false;
-    disableWakeWord().finally(startConversation);
-  });
-}
-// Ensure the mic is released if the user closes the lecture or leaves the page.
-els.closeBtn.addEventListener('click', () => { try { disableWakeWord(); } catch {} });
-window.addEventListener('beforeunload', () => { try { disableWakeWord(); } catch {} });
+
+// A lecture can be closed while the local detector owns the microphone.
+els.closeBtn.addEventListener('click', () => {
+  wakeWordDesired = false;
+  disableWakeWord();
+});
+window.addEventListener('beforeunload', () => { disableWakeWord(); });
 
 // ---------------------------------------------------------------------------
 // Bookmarks (G5 "Remember"): save current moment + reopen to seek. Persisted
@@ -1377,11 +1845,15 @@ let justSavedBookmarkId = null;
 
 async function loadBookmarks() {
   bm.list.innerHTML = '';
-  if (!currentVideoId) return;
+  const lectureId = currentVideoId;
+  if (!lectureId) return;
   try {
-    const res = await fetch(`/api/lectures/${currentVideoId}/bookmarks`);
+    const res = await fetch(`/api/lectures/${lectureId}/bookmarks`);
     const data = await res.json();
-    if (!res.ok) return;
+    if (!res.ok || lectureId !== currentVideoId) return;
+    // The existing bookmark API remains canonical. This mirrors returned active
+    // lecture bookmarks into the session-only review list without writing CSP data.
+    csp.setBookmarks(data.bookmarks || []);
     if (!data.count) { bm.list.append(el('div', { className: 'muted', textContent: 'No saved concepts yet.' })); return; }
     for (const b of data.bookmarks) {
       const row = el('div', { className: 'bm-item', id: 'bm-' + b.id });
@@ -1493,6 +1965,47 @@ function toggleRail(side) {
 }
 $('#leftRailToggle')?.addEventListener('click', () => toggleRail('left'));
 $('#rightRailToggle')?.addEventListener('click', () => toggleRail('right'));
+
+// Desktop chat rail resize: dragging left widens the conversation, dragging
+// right narrows it. The player keeps its minimum usable width and the setting
+// is local UI preference only.
+const CHAT_WIDTH_KEY = 'learnloop.chatWidth.v1';
+const chatResizeHandle = $('#chatResizeHandle');
+const looperRail = $('#looperRail');
+function applyChatWidth(width) {
+  if (!workspace || !Number.isFinite(width)) return;
+  workspace.style.setProperty('--right-w', `${Math.round(width)}px`);
+  try { localStorage.setItem(CHAT_WIDTH_KEY, String(Math.round(width))); } catch {}
+}
+try {
+  const savedChatWidth = Number(localStorage.getItem(CHAT_WIDTH_KEY));
+  if (Number.isFinite(savedChatWidth) && savedChatWidth >= 280 && savedChatWidth <= 640) applyChatWidth(savedChatWidth);
+} catch {}
+chatResizeHandle?.addEventListener('pointerdown', (event) => {
+  if (!workspace || !looperRail || workspace.dataset.right === 'closed' || window.innerWidth <= 1200) return;
+  event.preventDefault();
+  chatResizeHandle.setPointerCapture?.(event.pointerId);
+  const workspaceRect = workspace.getBoundingClientRect();
+  const leftWidth = $('#leftRail')?.getBoundingClientRect().width || 0;
+  const maxWidth = Math.max(280, Math.min(640, workspaceRect.width - leftWidth - 520));
+  const rightEdge = looperRail.getBoundingClientRect().right;
+  const move = (moveEvent) => applyChatWidth(Math.max(280, Math.min(maxWidth, rightEdge - moveEvent.clientX)));
+  const finish = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    window.removeEventListener('pointercancel', finish);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish, { once: true });
+  window.addEventListener('pointercancel', finish, { once: true });
+});
+chatResizeHandle?.addEventListener('keydown', (event) => {
+  if (!looperRail || workspace?.dataset.right === 'closed' || window.innerWidth <= 1200) return;
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  const delta = event.key === 'ArrowLeft' ? 24 : -24;
+  applyChatWidth(Math.max(280, Math.min(640, looperRail.getBoundingClientRect().width + delta)));
+});
 // "Open another lecture" → reveal the picker again without closing the current
 // lecture's media (closeLecture fully tears down; this is a lighter path).
 $('#newLectureBtn')?.addEventListener('click', () => {
@@ -1569,12 +2082,14 @@ function fileKey(file) {
   return `${file.name}|${file.size}|${file.lastModified}`;
 }
 
-async function autoProcess(file) {
+async function autoProcess(file, generation = lectureSessionGeneration) {
   // Client-side dedup (optimization only): same name+size+mtime this session.
   const key = fileKey(file);
   resetTranscriptUI();
   if (seenKeys.has(key)) {
+    if (generation !== lectureSessionGeneration) return;
     currentVideoId = seenKeys.get(key);
+    csp.setLecture(currentVideoId);
     tpSetStatus('Reusing previous transcription for this file.');
     startPolling();
     return;
@@ -1590,12 +2105,15 @@ async function autoProcess(file) {
     fd.append('client_key', key);
 
     const id = await uploadWithProgress('/api/lectures', fd, (pct) => setBar('uploading', pct));
+    if (generation !== lectureSessionGeneration) return;
     currentVideoId = id;
+    csp.setLecture(id);
     seenKeys.set(key, id);
     tpSetStatus('Processing…');
     startPolling();
     loadRecentLectures();  // reflect the new lecture in the recents list
   } catch (err) {
+    if (generation !== lectureSessionGeneration) return;
     tpSetStatus('Upload failed: ' + err.message, true);
   }
 }
@@ -1634,10 +2152,12 @@ function stopPolling() {
 }
 
 async function pollStatus() {
-  if (!currentVideoId) return;
+  const lectureId = currentVideoId;
+  if (!lectureId) return;
   try {
-    const res = await fetch(`/api/lectures/${currentVideoId}/status`);
+    const res = await fetch(`/api/lectures/${lectureId}/status`);
     const s = await res.json();
+    if (lectureId !== currentVideoId) return; // prior lecture response raced a switch
     if (!res.ok) throw new Error(s?.error?.message || `${res.status}`);
 
     const stageLabel = STAGE_LABEL[s.stage] || s.stage;
@@ -1652,7 +2172,6 @@ async function pollStatus() {
     } else if (s.stage === 'ready') {
       setBar('ready', 100);
       tpSetStatus(`Ready — ${s.segment_count} segments. Search or click a line to jump.`);
-      loadBookmarks();
     } else if (s.stage === 'failed') {
       setBar('failed', 100);
       tpSetStatus('Failed: ' + (s.error || 'unknown error'), true);
@@ -1667,19 +2186,28 @@ async function pollStatus() {
       await refreshTranscript();
       lastSegmentCount = s.segment_count;
     }
+    // Only activate after the server has completed processing and the trusted
+    // transcript records are present in this page.
+    if (s.stage === 'ready') {
+      csp.activate(lectureId, allSegments);
+      loadBookmarks(); // Existing persisted bookmarks are read after activation.
+    }
     if (s.segment_count > 0) { tp.query.disabled = false; tp.search.disabled = false; }
 
     if (s.stage === 'ready') stopPolling();
   } catch (err) {
+    if (lectureId !== currentVideoId) return;
     tpSetStatus('Status error: ' + err.message, true);
     stopPolling();
   }
 }
 
 async function refreshTranscript() {
-  const res = await fetch(`/api/lectures/${currentVideoId}/transcript`);
+  const lectureId = currentVideoId;
+  if (!lectureId) return;
+  const res = await fetch(`/api/lectures/${lectureId}/transcript`);
   const data = await res.json();
-  if (!res.ok) return;
+  if (!res.ok || lectureId !== currentVideoId) return;
   allSegments = data.segments || [];
   renderTranscriptList();
 }
@@ -1785,6 +2313,9 @@ function highlightCurrent(time) {
 }
 
 function resetTranscriptUI() {
+  clearCalmWalkthrough('lecture_change');
+  latestAssistantAnswer = null;
+  csp.clear();
   stopPolling();
   currentVideoId = null;
   allSegments = [];
@@ -1954,6 +2485,7 @@ async function loadRecentLectures() {
 async function reattachLecture(lec) {
   // Reopen the stored video from the server (honest recovery) and restore
   // its transcript. No upload, no new job.
+  lectureSessionGeneration++;
   resetTranscriptUI();
   if (currentObjectUrl) { URL.revokeObjectURL(currentObjectUrl); currentObjectUrl = null; }
 
@@ -1968,12 +2500,14 @@ async function reattachLecture(lec) {
   els.video.load();
 
   currentVideoId = lec.id;
+  csp.setLecture(lec.id);
   loadRecentLectures();   // refresh rail so the newly-active lecture is highlighted
   if (lec.stage === 'failed') {
     tpSetStatus('This lecture failed: ' + (lec.error || 'unknown error'), true);
     await refreshTranscript();            // show any partial segments honestly
   } else if (lec.stage === 'ready') {
     await refreshTranscript();
+    csp.activate(lec.id, allSegments);
     tp.query.disabled = allSegments.length === 0;
     tp.search.disabled = allSegments.length === 0;
     tpSetStatus(`Reopened — ${allSegments.length} segments. Search or click a line to jump.`);
@@ -1987,4 +2521,4 @@ async function reattachLecture(lec) {
 }
 
 // Expose a tiny hook for diagnostics (not required by the app).
-window.__learnloop = { player, formatTime, seek: (t) => player.seekTo(t), highlightCurrent };
+window.__learnloop = { player, formatTime, seek: (t) => player.seekTo(t), highlightCurrent, csp };

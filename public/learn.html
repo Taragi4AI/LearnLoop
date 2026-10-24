@@ -101,6 +101,8 @@
       <section class="ws-center" id="centerCol" data-size="large">
         <div class="player-head">
           <div class="player-title" id="lectureTitle">Lecture</div>
+          <a class="ctl small" id="cspLink" href="/csp.html" target="learnloop-csp"
+             title="Open the session-only Comprehensive Study Package">Comprehensive Study Package</a>
           <button class="ghost" id="closeBtn" type="button">Close lecture</button>
         </div>
 
@@ -221,6 +223,8 @@
 
       <!-- RIGHT SIDEBAR — Looper AI tutor (persistent chat + composer + bookmarks) -->
       <aside class="ws-right" id="looperRail" aria-label="Jarvis AI tutor">
+        <div class="chat-resize-handle" id="chatResizeHandle" role="separator" tabindex="0" aria-orientation="vertical"
+             aria-label="Resize Jarvis chat panel" title="Drag left or right to resize the chat panel"></div>
         <div class="rail-head">
           <strong>🎙️ Jarvis</strong>
           <span class="pill" id="wwState" data-s="off">Wake word off</span>
@@ -228,21 +232,16 @@
                   aria-label="Collapse Jarvis panel" title="Collapse">›</button>
         </div>
 
-        <!-- Wake-word arming is explicit. The manual trigger is debug-only and
-             stays out of the normal product flow. -->
+        <!-- The browser-local detector gates all Higgs microphone sessions. -->
         <div class="looper-activate">
           <div class="looper-row">
-            <button class="ctl" id="wwManual" type="button" hidden title="Development-only voice trigger">🎙 Activate</button>
-            <button class="ctl small" id="wwToggle" type="button" title="Listen for the wake word &quot;Hey Jarvis&quot;">Wake word</button>
+            <button class="ctl small" id="wwToggle" type="button" title="Listen locally for the wake phrase">Enable wake word</button>
           </div>
           <p class="hint hint-collapsible" id="wwHint">
-            Turn on wake word, then say <code>"Hey Jarvis"</code>. Wake-word
-            audio is processed locally in your browser.
+            Say <code>"Hey Jarvis"</code> to begin. Wake-word audio is processed
+            locally; Higgs receives microphone audio only during an active session.
+            Say <code>"stop listening"</code> to end the session and re-arm locally.
           </p>
-          <div class="looper-meterrow">
-            <div class="ww-meter" aria-hidden="true"><div class="ww-meter-fill" id="wwMeter"></div></div>
-            <span class="ww-score" id="wwScore" title="live wake-word model score">score —</span>
-          </div>
         </div>
 
         <!-- Scrollable chat history (fills remaining height) -->
@@ -252,9 +251,26 @@
               <span class="pill" id="rtState" data-s="idle">idle</span>
               <span class="speaking-dot" aria-hidden="true" title="Jarvis is speaking"><i></i></span>
               <span class="thinking-dots" aria-hidden="true" title="Jarvis is thinking"><span></span><span></span><span></span></span>
-              <button class="ctl small danger" id="rtStop" type="button" title="Stop the conversation">Stop</button>
+              <button class="ctl small danger" id="rtStop" type="button" title="End the Higgs session and release the microphone">End</button>
               <button class="ctl small" id="rtExport" type="button"
                       title="Download a timestamped JSON log of this conversation for debugging">Export</button>
+            </div>
+            <!-- Voice activity stays beneath the chat controls, above the
+                 scrollable history. It must not be pushed to the bottom of
+                 the rail while Jarvis is speaking. -->
+            <div class="cue-card-strip hidden" id="cueStrip" role="status" aria-live="polite">
+              <span class="cue-disc" id="cueIcon" aria-hidden="true"></span>
+              <span class="cue-main">
+                <span class="cue-line">
+                  <span class="cue-label" id="cueLabel"></span>
+                  <span class="cue-wave" id="cueWave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                  <span class="cue-dots" id="cueDots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                  <span class="cue-spin" id="cueSpin" aria-hidden="true"></span>
+                  <span class="cue-badge hidden" id="cueBadge"></span>
+                </span>
+                <span class="cue-sub" id="cueSub"></span>
+              </span>
+              <span class="cue-extra" id="cueExtra"></span>
             </div>
             <div class="convo-scroll">
               <div class="convo-log" id="rtLog" aria-live="polite"></div>
@@ -264,23 +280,6 @@
               <button class="jump-latest hidden" id="rtJumpLatest" type="button"
                       aria-label="Jump to latest message">↓ Jump to latest</button>
             </div>
-          </div>
-          <!-- Voice activity cue card: one compact cue at a time, reflecting a
-               REAL state/action. Never creates chat bubbles. Rounded white card
-               with a tinted circular icon disc (per the design reference). -->
-          <div class="cue-card-strip hidden" id="cueStrip" role="status" aria-live="polite">
-            <span class="cue-disc" id="cueIcon" aria-hidden="true"></span>
-            <span class="cue-main">
-              <span class="cue-line">
-                <span class="cue-label" id="cueLabel"></span>
-                <span class="cue-wave" id="cueWave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
-                <span class="cue-dots" id="cueDots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-                <span class="cue-spin" id="cueSpin" aria-hidden="true"></span>
-                <span class="cue-badge hidden" id="cueBadge"></span>
-              </span>
-              <span class="cue-sub" id="cueSub"></span>
-            </span>
-            <span class="cue-extra" id="cueExtra"></span>
           </div>
         </section>
 
@@ -296,6 +295,14 @@
         </section>
       </aside>
     </section>
+
+    <dialog class="walkthrough-dialog" id="walkthroughDialog" aria-labelledby="walkthroughDialogTitle">
+      <div class="walkthrough-dialog-head">
+        <h2 id="walkthroughDialogTitle">Calm Walkthrough</h2>
+        <button class="ctl small" id="walkthroughDialogClose" type="button">Close</button>
+      </div>
+      <div class="walkthrough-dialog-body" id="walkthroughDialogBody"></div>
+    </dialog>
   </main>
 
   <script type="module" src="learn.js"></script>

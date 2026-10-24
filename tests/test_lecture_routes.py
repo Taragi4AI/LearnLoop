@@ -119,6 +119,7 @@ def test_transcript_retrieval(seeded_app):
     assert status == 200
     data = hc.as_json(body)
     assert data["count"] == 3
+    assert data["segments"][0]["id"]  # CSP source links use this validated record id.
     assert data["segments"][0]["start"] == 0.0
     assert "gradient descent" in data["segments"][0]["text"].lower()
 

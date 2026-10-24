@@ -8,6 +8,7 @@
 
 import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,10 +17,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 const API_BASE = process.env.BOSON_API_BASE || 'https://api.boson.ai/v1';
 const API_KEY = process.env.BOSON_API_KEY;
+const AVATAR_REFERENCE_PATH = path.join(__dirname, 'image.png');
+const MAX_AVATAR_REFERENCE_BYTES = 10 * 1024 * 1024;
 
 const app = express();
 // TTS/avatar payloads can carry base64 audio/images, so allow large bodies.
 app.use(express.json({ limit: '25mb' }));
+// LearnLoop is intentionally bundle-free. Serve Mermaid's ESM build from the
+// installed package rather than fetching code from a hosted diagram service.
+app.use('/vendor/mermaid', express.static(path.join(__dirname, 'node_modules', 'mermaid', 'dist')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 function requireKey(res) {
@@ -61,6 +67,22 @@ app.get('/api/health', (_req, res) => {
     keyConfigured: Boolean(API_KEY),
     apiBase: API_BASE,
   });
+});
+
+// The Calm Walkthrough avatar always uses the learner-provided root image. It
+// is read-only: the browser converts this validated PNG to a data URI before
+// submitting it through the existing /api/videos proxy.
+app.get('/api/walkthrough/avatar-reference', (_req, res) => {
+  try {
+    const info = fs.statSync(AVATAR_REFERENCE_PATH);
+    if (!info.isFile() || info.size > MAX_AVATAR_REFERENCE_BYTES) {
+      return res.status(500).json({ error: { message: 'Avatar reference image is unavailable or exceeds 10 MB.' } });
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    return res.type('png').sendFile(AVATAR_REFERENCE_PATH);
+  } catch {
+    return res.status(404).json({ error: { message: 'Avatar reference image is unavailable.' } });
+  }
 });
 
 // ---------------------------------------------------------------------------

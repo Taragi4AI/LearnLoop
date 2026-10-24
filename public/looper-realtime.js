@@ -33,25 +33,40 @@ const TURN_DETECTION = {
 const LOOPER_INSTRUCTIONS =
   'You are Jarvis, a friendly, concise voice learning companion inside a lecture app. ' +
   'If asked your name, say you are Jarvis. ' +
-  'Keep replies short and conversational. You CAN control the lecture via tools: pause/play/' +
+  'This session is already active because a browser-local wake-word detector heard "Hey Jarvis". ' +
+  'Do not ask the learner to repeat the wake phrase. Keep replies short and conversational. ' +
+  'You CAN control the lecture via tools: pause/play/' +
   'rewind/forward (control_video), jump to a timestamp (seek_video), and manage bookmarks ' +
   '(prepare_bookmark then save_bookmark after the user approves, list_bookmarks, open_bookmark, ' +
   'update_bookmark to rename/renote, delete_bookmark to remove). ' +
   'To jump to where a concept was explained, use the lecture transcript context you are given ' +
   'to find the timestamp, then call seek_video. Only claim an action succeeded after the tool ' +
   'result confirms it. Never save a bookmark without explicit user approval. ' +
+  'When a learner explicitly asks you to explain, re-explain, simplify, break something down, ' +
+  'or give a walkthrough, give a calm beginner-friendly explanation. Use short, familiar ' +
+  'sentences and one small idea at a time. Define technical words before using them. Keep the ' +
+  'learner\'s active language style, including Hindi-English code-switching when they use it. ' +
+  'Only make lecture-specific claims that the supplied transcript supports and cite those ' +
+  'passages by their supplied timestamps. Clearly label anything else as general background. ' +
+  'An analogy is optional and must be presented as an analogy, never as a lecture fact. ' +
   'For every playback control request — pause, play, resume, seek, rewind, forward, mute, ' +
   'volume, or speed — call the appropriate tool and stay quiet after a successful result. ' +
   'Do not announce actions such as "The lecture is now paused" or "Playing now" because ' +
   'the control itself is the confirmation and speech can interrupt the lecture. ' +
-  'Do not end the listening session yourself. The app handles its explicit Stop control; ' +
-  'continue normally when a user merely mentions stopping or listening.';
+  'When the learner says "stop listening", "be quiet", "go to sleep", "end the conversation", ' +
+  'or "end the session", immediately call end_listening_session as your ONLY action. ' +
+  'The app will pause microphone forwarding and return to local wake-word listening. Return an empty response for that command: ' +
+  'do not say or write acknowledgements such as "understood", "okay", "got it", "I will be quiet", ' +
+  'or "I am not listening"; do not produce audio or text, and do not call any other tool.';
 
 // G5 agentic tools exposed to Higgs Realtime. Names/params are the contract the
 // model calls; the HOST executes them against trusted app state and returns a
 // function_call_output. The active lecture is NEVER taken from the model — the
 // host derives it from currentVideoId.
 export const LOOPER_TOOLS = [
+  { type: 'function', name: 'end_listening_session',
+    description: 'Immediately pause microphone forwarding for the current Higgs voice session and return to browser-local wake-word listening. The WebSocket stays connected for a fast wake-up. Call this as the only action when the learner directly asks to stop listening, be quiet, go to sleep, or end the conversation/session.',
+    parameters: { type: 'object', properties: {} } },
   { type: 'function', name: 'control_video',
     description: 'Control lecture playback. Actions: pause, play/resume, rewind, forward, '
       + 'replay (go back N seconds and play), mute, unmute, volume_up, volume_down, '
@@ -130,11 +145,13 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   let ws = null;
   let audioCtx = null, micStream = null, micNode = null, micSource = null;
   let outputGain = null, playHead = 0, scheduled = [];
-  let state = 'idle';     // idle | connecting | live | speaking | error | closed
+  let state = 'idle';     // idle | connecting | live | speaking | paused | error | closed
   let starting = false;
   let stopping = false;
+  let inputPaused = false; // socket retained; microphone forwarding detached
   let sessionGeneration = 0; // invalidates async callbacks from a closed socket
   let activeResponseId = null;   // id of the response currently streaming (for stale-guarding)
+  let responseActive = false;    // true only between response.created and response.done
   let activeAudioItemId = null;
   let audioPlaybackStartedAt = null;
   let detectorStarted = false;
@@ -232,19 +249,28 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   // protocol: response.cancel). Guard stale audio so late deltas don't restart
   // playback. Does NOT roll back any tool action that already executed.
   function interruptActiveResponse(reason = 'barge_in') {
-    if (stopping || (activeResponseId && cancelledResponseId === activeResponseId)) return false;
+    // `activeResponseId` is retained after completion to reject late deltas,
+    // so it alone is NOT proof that the provider still has a cancellable
+    // response. Calling response.cancel after response.done produces the
+    // provider's "No active response to cancel" error.
+    if (stopping || !responseActive || !activeResponseId || cancelledResponseId === activeResponseId) return false;
     mark(reason);
     if (activeResponseId) cancelledResponseId = activeResponseId;
+    responseActive = false;
     stopPlayback();
     agentAudioOpen = false;
-    // If local playback ended early, truncate the stored audio item to what the
-    // person actually heard. Some server events do not expose an item id; in
-    // that case cancellation is still safe and the native VAD owns the turn.
-    if (activeAudioItemId) {
-      send({ type: 'conversation.item.truncate', item_id: activeAudioItemId,
-             content_index: 0, audio_end_ms: heardAudioEndMs() });
+    // semantic_vad owns barge-in server-side. Sending a second cancel races the
+    // provider's automatic cancellation and can produce "No active response to
+    // cancel", which puts the session into its error path. In that mode we only
+    // stop local playback and ignore stale response deltas. The legacy manual
+    // turn mode still owns its explicit truncation/cancellation below.
+    if (!TURN_DETECTION) {
+      if (activeAudioItemId) {
+        send({ type: 'conversation.item.truncate', item_id: activeAudioItemId,
+               content_index: 0, audio_end_ms: heardAudioEndMs() });
+      }
+      send({ type: 'response.cancel' });
     }
-    send({ type: 'response.cancel' });
     onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
     onAgentAudioEnd && onAgentAudioEnd();
     return true;
@@ -272,27 +298,31 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
    *  response on end-of-turn, so this is a NO-OP (calling it would duplicate the
    *  turn). Only the legacy manual mode (TURN_DETECTION === null) sends it. */
   function requestResponse() {
-    if (TURN_DETECTION) return;
+    if (inputPaused || TURN_DETECTION) return;
     send({ type: 'response.create' });
   }
 
   /** Return a tool-call result to the model and continue the response (G5).
    *  `output` is any JSON-serialisable value; echoes the call_id per protocol. */
   function returnToolResult(callId, output) {
+    if (inputPaused) return false;
     send({
       type: 'conversation.item.create',
       item: { type: 'function_call_output', call_id: callId,
               output: typeof output === 'string' ? output : JSON.stringify(output) },
     });
     send({ type: 'response.create' });
+    return true;
   }
 
   async function start() {
     if (starting || (ws && ws.readyState === WebSocket.OPEN)) return;  // no duplicate sessions
     const generation = ++sessionGeneration;
     stopping = false;
+    inputPaused = false;
     cancelledResponseId = null;
     activeResponseId = null;
+    responseActive = false;
     activeAudioItemId = null;
     audioPlaybackStartedAt = null;
     starting = true;
@@ -380,6 +410,9 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   function onMessage(evt, generation) {
     if (stopping || generation !== sessionGeneration) return; // a close races with queued WS frames
     let msg; try { msg = JSON.parse(evt.data); } catch { return; }
+    // A paused session intentionally retains its WebSocket but must not render
+    // stale model output or treat residual provider events as a fresh turn.
+    if (inputPaused && msg.type !== 'error') return;
     switch (msg.type) {
       case 'session.created': setState('live', 'Session ready — speak now.'); break;
       case 'input_audio_buffer.speech_started':
@@ -405,6 +438,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         const newId = (msg.response && msg.response.id) || msg.response_id || null;
         if (newId && newId !== activeResponseId) stopPlayback();
         activeResponseId = newId || activeResponseId;
+        responseActive = true;
         activeAudioItemId = msg.item_id || msg.output_item_id || null;
         audioPlaybackStartedAt = null;
         firstTextMarked = false; firstAudioMarked = false;
@@ -414,6 +448,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
       }
       case 'response.output_audio.delta':
       case 'response.audio.delta': {
+        if (!responseActive) break; // completed response; ignore a late audio frame
         const rid = msg.response_id || activeResponseId;
         if (rid && (rid === cancelledResponseId || (activeResponseId && rid !== activeResponseId))) break;
         if (msg.item_id) activeAudioItemId = msg.item_id;
@@ -422,6 +457,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
       }
       case 'response.output_audio_transcript.delta':
       case 'response.audio_transcript.delta': {
+        if (!responseActive) break; // completed response; ignore a late transcript frame
         const rid = msg.response_id || activeResponseId;
         if (rid && (rid === cancelledResponseId || (activeResponseId && rid !== activeResponseId))) break;
         // Pass the response id so the host associates this delta with the right
@@ -443,6 +479,10 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
         // A response may END in client tool calls (G5). Execute those and
         // continue; only a response.done with NO client calls is the final turn.
         const output = (msg.response && msg.response.output) || [];
+        // This response is already terminal, including the tool-call branch
+        // below. A later speech-start must wait for the continuation response
+        // created after the tool result instead of cancelling this one.
+        responseActive = false;
         const clientCalls = output.filter(
           (it) => it && it.type === 'function_call' && (it.executor === 'client' || it.executor == null)
         );
@@ -511,7 +551,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
    *  Uses the documented conversation.item.create with a user text item. Does
    *  NOT itself trigger a response (server_vad drives responses from speech). */
   function sendContext(text) {
-    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (inputPaused || !text || !ws || ws.readyState !== WebSocket.OPEN) return false;
     send({
       type: 'conversation.item.create',
       item: { type: 'message', role: 'user',
@@ -567,6 +607,39 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     micNode.connect(mute); mute.connect(audioCtx.destination);
   }
 
+  function pauseInput(reason = 'paused') {
+    if (stopping || inputPaused || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    inputPaused = true;
+    // Do not race semantic VAD with response.cancel. Suppress local playback
+    // and stale deltas while the provider finishes any in-flight response.
+    if (responseActive && activeResponseId) {
+      cancelledResponseId = activeResponseId;
+      responseActive = false;
+      stopPlayback();
+      onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
+    }
+    agentAudioOpen = false;
+    teardownAudio();
+    setState('paused', reason);
+    return true;
+  }
+
+  async function resumeInput() {
+    if (stopping || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (!inputPaused) return true;
+    setState('connecting', 'Resuming microphone…');
+    try {
+      await startMic();
+      if (stopping || !ws || ws.readyState !== WebSocket.OPEN) return false;
+      inputPaused = false;
+      setState('live', 'Listening — speak now.');
+      return true;
+    } catch (err) {
+      setState('error', 'Microphone access failed: ' + (err?.message || err));
+      return false;
+    }
+  }
+
   function playPcmChunk(base64) {
     if (!audioCtx) return;
     const bytes = bytesFromBase64(base64);
@@ -612,17 +685,15 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   function stop(reason = 'stopped') {
     if (stopping || state === 'closed') return;
     stopping = true;
+    inputPaused = false;
     sessionGeneration++;
-    // stop() deliberately owns its own cancellation, not only response.done,
-    // so scheduled audio and stale deltas cannot resurrect a closed session.
-    if (activeResponseId && cancelledResponseId !== activeResponseId) {
+    // Closing the socket ends a response on the provider. Do not race that
+    // shutdown with response.cancel: semantic VAD can have already cancelled it
+    // and Higgs rejects a second cancellation as an invalid request.
+    if (responseActive && activeResponseId && cancelledResponseId !== activeResponseId) {
       cancelledResponseId = activeResponseId;
+      responseActive = false;
       stopPlayback();
-      if (activeAudioItemId) {
-        send({ type: 'conversation.item.truncate', item_id: activeAudioItemId,
-               content_index: 0, audio_end_ms: heardAudioEndMs() });
-      }
-      send({ type: 'response.cancel' });
       onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
     }
     try { ws && ws.close(); } catch {}
@@ -632,7 +703,8 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     setState('closed', reason === 'multiple-speakers' ? 'Multiple speakers detected.' : 'Session stopped.');
   }
 
-  return { start, stop, sendContext, requestResponse, returnToolResult, get state() { return state; } };
+  return { start, stop, pauseInput, resumeInput, sendContext, requestResponse, returnToolResult,
+           get state() { return state; } };
 }
 
 // ---- PCM / base64 helpers (from the proven playground client) ----
