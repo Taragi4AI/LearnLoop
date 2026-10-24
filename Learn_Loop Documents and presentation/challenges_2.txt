@@ -1,0 +1,65 @@
+LearnLoop — Challenge Log 2
+================================
+
+Challenge 1: VAD and turn handoff
+- Confirm exactly when client-side energy VAD detects speech and when it commits the turn to Higgs.
+- Current reported behavior: microphone frames are processed in `looper-realtime.js`; speech is detected using an RMS threshold, and a turn is committed after consecutive quiet frames.
+- Verify the configured threshold and silence-frame count against the current source before changing them.
+- Document when turn detection pauses and resumes, including the `awaitingAnswer` and speaking states.
+
+Challenge 2: Microphone lifecycle
+- Determine when the microphone is acquired, when audio frames are appended to Higgs, and when tracks/session resources are released.
+- Clarify whether local VAD runs during standby, during an active Realtime session, or both.
+- Ensure wake-word standby and active conversation do not create competing microphone consumers.
+- Preserve manual activation as a fallback and report the actual lifecycle from code.
+
+Challenge 3: Voice interruption / barge-in
+- Looper does not reliably stop speaking when the user interrupts.
+- Reported root cause: `turn_detection: null` disables server-side turn detection, so the expected server `input_audio_buffer.speech_started` event may not fire.
+- The existing client handler relies on that event, and local interruption handling may not send a response-cancellation event.
+- Implement confirmed local speech-onset detection during assistant playback; stop playback promptly and cancel the active Higgs response using the supported protocol.
+- Handle late audio/text events and reconcile in-flight tool actions truthfully. Do not imply a completed tool action was rolled back.
+- Preserve the no-audio-overlap policy: pause and verify the lecture is paused before Looper audio plays.
+
+Challenge 4: Slow response latency
+- Observed delay can be approximately four seconds after the user finishes speaking; this is a reported observation, not a measured baseline.
+- Reported contributing factors:
+  1. A silence wait controlled by `SILENCE_CALLBACKS` (reported as 12 frames).
+  2. Transcription completion after turn commit.
+  3. A lecture-context retrieval request before `response.create`.
+  4. Model generation and audio startup.
+- Instrument the pipeline with monotonic timestamps: speech end, turn commit, transcription completion, context retrieval start/end, response request, first text delta, first audio delta, and first audible playback.
+- Establish a baseline before tuning. Test a configurable reduction in the silence threshold, including 5–6 frames, but do not assume it is optimal.
+- Test natural pauses and technical terms to prevent premature turn commits or cut-off speech.
+- Optimize context retrieval without allowing answers to begin before required grounding context is ready.
+- Report actual before/after measurements; do not invent latency figures.
+
+Challenge 5: Chat transcript synchronization
+- User speech currently appears only after final transcription; no interim transcription event was confirmed in the reported code review.
+- Assistant text is rendered from audio-transcript delta events, without word-alignment timestamps.
+- Stream assistant text into one message bubble, reconcile final events without duplication, preserve message order, and handle interruption/cancellation safely.
+- Display user transcription as early as the supported protocol allows.
+- Do not claim exact word-to-audio synchronization without reliable alignment timestamps.
+
+Challenge 6: Chat auto-scroll
+- The conversation does not reliably scroll to keep the latest message visible.
+- Suspected causes include an unbounded `.convo-scroll` container, incorrect scroll ownership, or sentinel/IntersectionObserver state problems. These are hypotheses until verified in the live layout.
+- Ensure the actual conversation container has a constrained height and `overflow-y: auto`.
+- Auto-follow streamed content while the user is at the bottom.
+- Respect deliberate upward scrolling and provide a “Jump to latest” control when new content arrives.
+- Keep scrolling confined to the chat panel.
+
+Implementation constraints
+--------------------------
+- Re-read the current source and verify reported causes before editing.
+- Keep changes minimal and focused; preserve the existing manual-turn/context-grounding design unless evidence shows a necessary change.
+- Do not blindly enable server-side VAD or change silence thresholds without measurement.
+- Preserve wake-word behavior, transcript grounding, player controls, bookmark CRUD, and existing audio-overlap protection.
+- Add regression tests for affected paths and run the existing test suite.
+- Perform live browser/microphone/Higgs verification where available; clearly label anything not tested live.
+- Separate confirmed behavior, hypotheses, changes, test evidence, and remaining limitations in the final report.
+- Do not commit, push, merge, tag, rewrite Git history, or configure a remote repository.
+
+Acceptance test
+---------------
+Ask Looper a question, interrupt it halfway through its spoken answer, and immediately ask a follow-up. The first answer should stop, the follow-up should be heard, the lecture must not overlap Looper, and the chat should show the correct ordered conversation while keeping the latest message visible.

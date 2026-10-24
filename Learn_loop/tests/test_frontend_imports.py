@@ -30,7 +30,8 @@ def _imported_names(src: str) -> set[str]:
 # locally in learn.js).
 EXTERNAL_HELPERS = {"el", "createPlayerController", "validateFile", "formatTime",
                     "createSearchNav", "createWakeWordListener", "createLooperSession",
-                    "createTurnSequencer"}
+                    "createTurnSequencer",
+                    "shouldApplyResponseEvent", "reconcileFinalText", "autoScrollDecision"}
 
 
 def test_learn_js_imports_every_external_helper_it_uses():

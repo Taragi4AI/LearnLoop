@@ -26,7 +26,7 @@ G1_ASSETS = [
     ("/looper-realtime.js", "javascript", b"createLooperSession"),
     ("/looper-realtime.js", "javascript", b"input_audio_buffer.append"),  # mic→Realtime
     ("/looper-realtime.js", "javascript", b"conversation.item.create"),   # G4 context injection
-    ("/looper-realtime.js", "javascript", b"turn_detection: null"),       # manual turns (race fix)
+    ("/looper-realtime.js", "javascript", b"semantic_vad"),               # server-side turn detection
     ("/looper-realtime.js", "javascript", b"requestResponse"),            # explicit response trigger
     ("/turn-sequencer.js", "javascript", b"createTurnSequencer"),         # sequencer module
     ("/learn.html", "text/html", b"rtStop"),               # stop-conversation control
@@ -50,6 +50,72 @@ G1_ASSETS = [
     ("/learn.js", "javascript", b"ensureLecturePausedForSpeech"),      # verified pause policy
     ("/learn.js", "javascript", b"resumeLectureAfterSpeech"),          # resume on session end (unstick)
     ("/learn.js", "javascript", b"captureResumeIntent"),               # remember pre-activation play state
+    # --- Warm academic theme + live streaming chat ---
+    ("/learn.css", "css", b"#FAF7F0"),                                 # warm ivory background
+    ("/learn.css", "css", b".convo-row.looper.streaming"),             # live-streaming caret state
+    ("/learn.js", "javascript", b"appendConvoDelta"),                  # incremental bubble update
+    ("/learn.js", "javascript", b"setSpeakingIndicator"),              # subtle speaking indicator
+    ("/looper-realtime.js", "javascript", b"onUserPending"),           # provisional user-turn signal
+    ("/looper-realtime.js", "javascript", b"onAssistantInterrupted"),  # barge-in interruption signal
+    # --- Phase 2: three-panel workspace layout ---
+    ("/learn.html", "text/html", b'class="workspace'),                 # grid workspace container
+    ("/learn.html", "text/html", b'id="leftRail"'),                    # left lecture-nav rail
+    ("/learn.html", "text/html", b'id="centerCol"'),                   # center player+transcript
+    ("/learn.html", "text/html", b'id="looperRail"'),                  # right Looper rail
+    ("/learn.html", "text/html", b"looper-activate"),                  # always-visible activation controls
+    ("/learn.css", "css", b"grid-template-columns"),                   # CSS grid layout
+    ("/learn.js", "javascript", b"toggleRail"),                        # rail collapse logic
+    # --- Phase 3: video priority, display settings, focus/scroll fixes ---
+    ("/learn.js", "javascript", b"revealInContainer"),                 # container-only scroll (no page jump)
+    ("/learn.js", "javascript", b"followTranscript"),                  # opt-in follow mode (default off)
+    ("/learn.js", "javascript", b"toggleFullscreen"),                  # fullscreen control
+    ("/learn.js", "javascript", b"applyDisplayPrefs"),                 # fit/ratio/size settings
+    ("/learn.html", "text/html", b'id="settingsBtn"'),                 # display settings menu
+    ("/learn.html", "text/html", b'id="fullscreenBtn"'),               # fullscreen button
+    ("/learn.html", "text/html", b'id="followTranscript"'),            # follow-transcript toggle
+    ("/learn.html", "text/html", b'data-fit="contain"'),               # default fit container
+    ("/learn.css", "css", b"minmax(520px, 1fr)"),                      # center min-width guard
+    ("/learn.css", "css", b"object-fit"),                              # no-distortion fit
+    # --- Phase 5: purposeful motion + microinteractions ---
+    ("/learn.css", "css", b"prefers-reduced-motion"),                  # reduced-motion gate
+    ("/learn.css", "css", b"--ease-out"),                              # shared motion tokens
+    ("/learn.css", "css", b"@keyframes bubble-in"),                    # restrained bubble entrance
+    ("/learn.css", "css", b".bm-item.just-saved"),                     # post-save confirmation flash
+    ("/learn.css", "css", b"thinking-dots"),                           # discreet thinking indicator
+    ("/learn.js", "javascript", b"setThinkingIndicator"),              # thinking state wiring
+    ("/learn.js", "javascript", b"justSavedBookmarkId"),               # confirm only after backend save
+    # --- live chat sync + auto-scroll ---
+    ("/chat-stream.js", "javascript", b"shouldApplyResponseEvent"),    # stale-response guard
+    ("/chat-stream.js", "javascript", b"reconcileFinalText"),          # no duplicate final text
+    ("/learn.js", "javascript", b"bubbleForResponse"),                 # response-id → bubble mapping
+    ("/learn.js", "javascript", b"maybeAutoScroll"),                   # follow-bottom logic
+    ("/learn.html", "text/html", b'id="rtJumpLatest"'),                # jump-to-latest control
+    ("/learn.html", "text/html", b'id="rtSentinel"'),                  # bottom sentinel
+    ("/looper-realtime.js", "javascript", b"onResponseStart"),         # response lifecycle id
+    ("/looper-realtime.js", "javascript", b"activeResponseId"),        # stale-guard source
+    # --- realtime voice fixes: barge-in, latency tuning, instrumentation ---
+    ("/looper-realtime.js", "javascript", b"bargeInCancel"),           # interrupt-cancel path
+    ("/looper-realtime.js", "javascript", b"response.cancel"),         # supported cancel protocol
+    ("/looper-realtime.js", "javascript", b"detectBargeIn"),           # local speech-onset while speaking
+    ("/looper-realtime.js", "javascript", b"cancelledResponseId"),     # stale-audio guard after cancel
+    ("/looper-realtime.js", "javascript", b"silenceCallbacks"),        # configurable end-of-turn
+    ("/learn.js", "javascript", b"latency_mark"),                      # pipeline timing instrumentation
+    ("/learn.css", "css", b".ws-right .convo-scroll { max-height"),    # bounded chat scroll (laptops)
+    # --- voice activity cues ---
+    ("/learn.html", "text/html", b'id="cueStrip"'),                    # activity cue strip
+    ("/learn.js", "javascript", b"showRetrievalResult"),               # retrieval timestamp card
+    ("/learn.js", "javascript", b"showActionCueResult"),               # confirmed action outcome
+    ("/learn.js", "javascript", b"CUE_DEFS"),                          # the five cue definitions
+    ("/learn.css", "css", b".cue-card-strip"),                         # cue card styling
+    ("/learn.css", "css", b"@keyframes cwave"),                        # waveform cue
+    ("/learn.js", "javascript", b"captureFrameThumb"),                 # real-frame thumbnail (safe)
+    ("/learn.js", "javascript", b"const SVG"),                         # inline SVG icon set (no emoji)
+    # --- chat scroll / listening controls / seek fixes ---
+    ("/learn.js", "javascript", b"seekAndConfirm"),                    # async-verified seek
+    ("/learn.js", "javascript", b"isStopListeningCommand"),            # "stop listening" control phrase
+    ("/learn.js", "javascript", b"userStoppedExplicitly"),             # no auto-restart after explicit stop
+    ("/learn.css", "css", b"max-height: 52vh"),                        # hard chat-scroll bound fallback
+    ("/looper-realtime.js", "javascript", b"minutes: { type"),         # minutes/seconds seek path
     ("/learn.js", "javascript", b"renameBookmark"),                    # UI rename
     ("/learn.js", "javascript", b"deleteBookmark"),                    # UI delete
     ("/player-core.js", "javascript", b"setVolume"),                   # volume control surface

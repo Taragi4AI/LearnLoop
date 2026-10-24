@@ -1,28 +1,303 @@
 /* LearnLoop G1 — lecture player styles. Layered on top of styles.css. */
 
-.learn-main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+/* ===================================================================== */
+/* Warm academic theme. Scoped to .learn-body so the playground page     */
+/* (index.html, which also loads styles.css) keeps its original look.    */
+/* We override the shared :root variables locally and then re-skin the   */
+/* page-specific components below. Palette:                              */
+/*   bg #FAF7F0  panel #FFFFFF  surface-2 #E8DED0  accent #345B91         */
+/*   user-msg #DCE7F5  looper-msg #F0E9DD  text #302C26  muted #756B5E    */
+/*   border #E8E0D3                                                       */
+/* ===================================================================== */
+.learn-body {
+  color-scheme: light;
+  --bg: #FAF7F0;
+  --panel: #FFFFFF;
+  --panel-2: #E8DED0;
+  --surface-2: #E8DED0;
+  --border: #E8E0D3;
+  --text: #302C26;
+  --muted: #756B5E;
+  --accent: #345B91;
+  --accent-2: #345B91;
+  --accent-soft: #DCE7F5;   /* user message / selected tint */
+  --looper-soft: #F0E9DD;   /* looper message */
+  --good: #2F7D5B;
+  --bad: #B0452F;
+  --warn: #9A6B12;
+  --radius: 12px;
+}
+/* Flatten the dark radial gradient the base sheet paints on <body>. */
+.learn-body { background: var(--bg); }
+
+/* Topbar + brand on the warm theme (base sheet uses a dark-on-dark gradient logo). */
+.learn-body .topbar { border-bottom: 1px solid var(--border); background: var(--panel); }
+.learn-body .logo {
+  background: none; -webkit-background-clip: border-box; background-clip: border-box;
+  color: var(--accent);
+}
+.learn-body .key-status { background: var(--panel); border: 1px solid var(--border); }
+
+/* Buttons from the base sheet: the gradient primary + dark text don't suit the
+   light theme, so flatten to the solid academic accent. */
+.learn-body button.primary {
+  background: var(--accent); color: #ffffff; font-weight: 600; border: none;
+}
+.learn-body button.primary:hover { filter: none; background: #2a4a78; }
+.learn-body button.ghost { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.learn-body button.ghost:hover { border-color: var(--accent); }
+
+/* Picker stays a centered column; the workspace goes full-width (below).
+   NOTE: the base styles.css clamps `main { max-width: 920px }`, which boxed the
+   whole workspace into a narrow strip. Override it so the three-panel grid can
+   use the real viewport width. */
+.learn-main { max-width: none; width: 100%; margin: 0 auto; padding: 20px 24px 40px; }
+.learn-main > .lecture-picker { max-width: 920px; margin: 0 auto; }
+
+/* ===================================================================== */
+/* Motion design system. Durations/easings are shared tokens so motion is  */
+/* consistent and purposeful. Only opacity/transform/background/color/     */
+/* outline are animated (cheap, no layout thrash). Every transition below  */
+/* communicates state, a transition, or affordance — nothing decorative.   */
+/* ===================================================================== */
+.learn-body {
+  --mo-fast: 130ms;     /* hover / press / focus */
+  --mo-menu: 160ms;     /* tooltips, small menus */
+  --mo-panel: 200ms;    /* panel expand / collapse */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);   /* entering */
+  --ease-in: cubic-bezier(0.55, 0.06, 0.68, 0.19);  /* leaving */
+}
+/* Accessibility: honor reduced-motion. Replace motion with instant state
+   changes rather than removing the feedback entirely. */
+@media (prefers-reduced-motion: reduce) {
+  .learn-body *, .learn-body *::before, .learn-body *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 
 .hidden { display: none !important; }
 
-/* ---- Lecture picker ---- */
-.lecture-picker h2 { margin-bottom: 4px; }
+/* ===================================================================== */
+/* Phase 2 — three-panel learning workspace                              */
+/*   LEFT rail (nav) · CENTER (player + transcript) · RIGHT rail (Looper)*/
+/* Grid columns collapse to 0 when a rail is closed. Center always wins  */
+/* the largest share via 1fr. Rails have sensible min/max widths.        */
+/* ===================================================================== */
+.workspace {
+  display: grid;
+  /* Rails have fixed widths; center takes the rest via minmax(0,1fr) so long
+     transcript lines / chat strings can NEVER widen the grid or crush the video. */
+  grid-template-columns: var(--left-w, 200px) minmax(520px, 1fr) var(--right-w, 320px);
+  gap: 16px;
+  align-items: start;
+  max-width: 1700px;
+  margin: 0 auto;
+  /* Fill the viewport below the topbar so rails/transcript/chat can scroll
+     internally rather than growing the whole page. */
+  height: calc(100vh - 140px);
+  min-height: 520px;
+  /* Smooth rail collapse/expand (modern browsers animate grid tracks). The
+     video is max-width-capped + centered, so this never distorts it. */
+  transition: grid-template-columns var(--mo-panel) var(--ease-out);
+}
+/* Collapsed rails: column shrinks to a slim strip holding just the toggle. */
+.workspace[data-left="closed"]  { --left-w: 44px; }
+.workspace[data-right="closed"] { --right-w: 44px; }
+
+/* ---- Rails (shared) ---- */
+.ws-left, .ws-right {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  height: 100%; display: flex; flex-direction: column; overflow: hidden;
+}
+.rail-head {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+  border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.rail-head strong { font-size: 14px; }
+.rail-toggle {
+  margin-left: auto; background: var(--surface-2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 8px; width: 28px; height: 28px;
+  cursor: pointer; font-size: 15px; line-height: 1; flex: 0 0 auto;
+}
+.rail-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.rail-body { padding: 12px 14px; overflow-y: auto; flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; }
+
+/* Collapsed state: hide everything except the toggle, rotate affordance. */
+.workspace[data-left="closed"] .ws-left .rail-head strong,
+.workspace[data-left="closed"] .ws-left .rail-body,
+.workspace[data-right="closed"] .ws-right .rail-head strong,
+.workspace[data-right="closed"] .ws-right .rail-head .pill,
+.workspace[data-right="closed"] .ws-right > :not(.rail-head),
+.workspace[data-right="closed"] .ws-right .rail-body { display: none; }
+.workspace[data-left="closed"]  .ws-left  .rail-head { border-bottom: none; justify-content: center; padding: 12px 6px; }
+.workspace[data-right="closed"] .ws-right .rail-head { border-bottom: none; justify-content: center; padding: 12px 6px; }
+.workspace[data-left="closed"]  #leftRailToggle  { margin: 0; }
+.workspace[data-right="closed"] #rightRailToggle { margin: 0; }
+.workspace[data-left="closed"]  #leftRailToggle::before  { content: '›'; }
+.workspace[data-left="closed"]  #leftRailToggle  { font-size: 0; }
+.workspace[data-left="closed"]  #leftRailToggle::before  { font-size: 15px; }
+.workspace[data-right="closed"] #rightRailToggle { font-size: 0; }
+.workspace[data-right="closed"] #rightRailToggle::before { content: '‹'; font-size: 15px; }
+
+/* ---- Left rail content ---- */
+.ws-newlecture { align-self: stretch; }
+.rail-links { display: flex; flex-direction: column; gap: 4px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); }
+.rail-link { color: var(--accent); text-decoration: none; font-size: 13px; padding: 6px 8px; border-radius: 8px; }
+.rail-link:hover { background: var(--surface-2); }
+.recent-item.active { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---- Center column: video is the dominant element ---- */
+.ws-center {
+  display: flex; flex-direction: column; gap: 10px; height: 100%;
+  min-width: 0;                       /* allow the column to shrink, never overflow */
+}
+/* The video shell is capped by a size-mode max-width and centered, so it stays
+   a comfortable viewing size instead of being stretched thin or crushed. The
+   16:9 (or chosen) aspect-ratio then sets its height from that width. */
+.ws-center .video-shell { flex: 0 0 auto; width: 100%; margin: 0 auto; }
+.ws-center[data-size="compact"]     .video-shell { max-width: 640px; }
+.ws-center[data-size="comfortable"] .video-shell { max-width: 860px; }
+.ws-center[data-size="large"]       .video-shell { max-width: 1100px; }
+
+/* Transcript takes the remaining height and scrolls on its own container. */
+.ws-center .transcript-panel { flex: 1 1 auto; margin-top: 0; display: flex; flex-direction: column; min-height: 160px; }
+.ws-center .transcript-panel .tp-list { flex: 1 1 auto; max-height: none; min-height: 0; }
+
+/* Controls: grouped, with the display group pushed to the right. */
+.controls { align-items: center; }
+.ctl-group { display: inline-flex; align-items: center; gap: 8px; }
+.ctl-group-right { margin-left: auto; }
+.ctl.icon { min-width: 34px; display: inline-flex; align-items: center; justify-content: center; }
+.volume { width: 90px; accent-color: var(--accent); cursor: pointer; }
+
+/* ---- Right rail (Looper) — flex column, 3 zones:
+   [activation: fixed top] · [chat: grows/scrolls] · [bookmarks: fixed bottom]
+   Activation is ALWAYS visible so both start methods are reachable regardless
+   of chat height or viewport size. ---- */
+.ws-right .looper-activate {
+  flex: 0 0 auto; padding: 12px 14px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ws-right .looper-activate .looper-row { display: flex; gap: 8px; margin: 0; }
+.ws-right #wwManual { flex: 1 1 auto; }     /* primary action gets the width */
+
+/* The chat panes grow to fill the rail but keep a visible minimum so the chat
+   box is always present (even empty). The inner .convo-scroll is the single
+   scroller (min 160px, capped at 52vh) so long chats scroll internally. */
+.ws-right .looper-panel { flex: 1 1 auto; min-height: 180px; margin-top: 0; border: none; border-radius: 0; padding: 10px 14px; display: flex; flex-direction: column; overflow: hidden; }
+.ws-right .looper-convo { flex: 1 1 auto; min-height: 160px; display: flex; flex-direction: column; margin-top: 0; border-top: none; padding-top: 0; overflow: hidden; }
+.ws-right .convo-head { flex: 0 0 auto; }
+.ws-right .convo-head #rtExport { margin-left: auto; }
+/* The scroll container holds the log + a bottom sentinel + the floating
+   Jump-to-latest button. It is the ONLY thing that scrolls (not the page).
+   The flex:1 1 0 chain bounds it when the rail has a real height; the vh
+   max-height is a hard fallback so it ALWAYS scrolls even if an ancestor's
+   height doesn't resolve (long conversations must never grow the panel). */
+.ws-right .convo-scroll { flex: 1 1 auto; min-height: 160px; max-height: 52vh; overflow-y: auto; position: relative; }
+.ws-right .convo-log { max-height: none; }
+.convo-sentinel { height: 1px; width: 100%; }
+.jump-latest {
+  position: sticky; bottom: 8px; left: 50%; transform: translateX(-50%);
+  display: inline-block; margin: 0 auto; padding: 6px 12px; font-size: 12px;
+  background: var(--accent); color: #fff; border: none; border-radius: 999px;
+  cursor: pointer; box-shadow: 0 2px 8px rgba(48,44,38,0.18);
+  transition: opacity var(--mo-fast) var(--ease-out);
+}
+.jump-latest:hover { background: #2a4a78; }
+.looper-meterrow { display: flex; align-items: center; gap: 10px; }
+.ws-right .bm-panel {
+  flex: 0 0 auto; margin-top: 0; padding: 10px 14px; border: none;
+  border-top: 1px solid var(--border); border-radius: 0;
+  max-height: 34%; overflow-y: auto; background: var(--panel);
+}
+.hint-collapsible { font-size: 12px; margin: 0; color: var(--muted); }
+
+/* ===================================================================== */
+/* ---- Lecture picker / landing page ---- */
+/* Centered hero, card-style dropzone, feature row, recent-lecture grid.  */
+/* ===================================================================== */
+.lecture-picker { padding-top: 24px; }
+
+/* Hero */
+.hero { text-align: center; max-width: 680px; margin: 0 auto 8px; }
+.hero-eyebrow {
+  display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent);
+  background: var(--accent-soft); border: 1px solid #cdddf1;
+  padding: 4px 12px; border-radius: 999px; margin-bottom: 14px;
+}
+.hero-title { font-size: 30px; line-height: 1.2; margin: 0 0 10px; color: var(--text); font-weight: 700; }
+.hero-sub { color: var(--muted); font-size: 15px; line-height: 1.6; margin: 0; }
+.hero-sub strong { color: var(--accent); }
+
+/* Dropzone — a real card, centered, with an accent-tinted icon disc. */
 .drop-zone {
-  margin-top: 16px;
-  border: 2px dashed rgba(139, 147, 167, 0.5);
-  border-radius: 14px;
-  padding: 44px 20px;
+  max-width: 680px; margin: 22px auto 0;
+  background: var(--panel);
+  border: 2px dashed #d8cdbb;
+  border-radius: 16px;
+  padding: 40px 24px;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
   outline: none;
+  transition: border-color var(--mo-fast) var(--ease-out),
+              background var(--mo-fast) var(--ease-out),
+              transform var(--mo-fast) var(--ease-out),
+              box-shadow var(--mo-fast) var(--ease-out);
 }
-.drop-zone:hover, .drop-zone:focus-visible { border-color: #6ea8fe; background: rgba(110, 168, 254, 0.06); }
-.drop-zone.drag { border-color: #6ea8fe; background: rgba(110, 168, 254, 0.12); }
-.drop-icon { font-size: 40px; display: block; margin-bottom: 8px; }
-.drop-inner p { margin: 2px 0; }
+.drop-zone:hover, .drop-zone:focus-visible {
+  border-color: var(--accent); background: #fff;
+  transform: translateY(-2px); box-shadow: 0 8px 24px rgba(52, 91, 145, 0.10);
+}
+.drop-zone.drag { border-color: var(--accent); background: var(--accent-soft); }
+.drop-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 72px; height: 72px; margin-bottom: 14px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent);
+}
+.drop-primary { margin: 2px 0; font-size: 16px; color: var(--text); }
+.drop-primary strong { color: var(--accent); }
+.drop-inner p.muted { margin: 4px 0 0; font-size: 13px; }
 
-.picker-msg { margin-top: 12px; min-height: 1.2em; }
-.picker-msg.err { color: #ff6b6b; }
+.picker-msg { margin: 12px auto 0; max-width: 680px; text-align: center; min-height: 1.2em; }
+.picker-msg.err { color: var(--bad); }
+
+/* Feature row */
+.hero-feats {
+  list-style: none; margin: 22px auto 0; padding: 0; max-width: 720px;
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 14px;
+}
+.hero-feats li {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  padding: 7px 14px; font-size: 13px; color: var(--text);
+}
+.feat-ic {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; color: var(--accent); font-size: 13px;
+}
+
+/* Recent lectures as a responsive card grid. */
+.recent { margin-top: 36px; max-width: 760px; margin-left: auto; margin-right: auto; }
+.recent-head { font-weight: 600; margin-bottom: 12px; color: var(--text); }
+.recent-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px;
+}
+.recent-grid .muted { grid-column: 1 / -1; }
+/* Cards reuse .recent-item (styled below) but lay out as blocks in the grid. */
+.recent-grid .recent-item {
+  flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px;
+}
+.recent-grid .recent-item .recent-title { font-weight: 600; white-space: normal; }
+.recent-grid .recent-item .recent-stage {
+  align-self: flex-start; font-size: 11px; text-transform: capitalize;
+  background: var(--surface-2); color: var(--muted);
+  padding: 2px 9px; border-radius: 999px;
+}
+.recent-grid .recent-item .recent-stage::before { content: '● '; color: var(--good); }
 
 /* ---- Player ---- */
 .player-head {
@@ -33,71 +308,96 @@
 .video-shell {
   position: relative; background: #000; border-radius: 12px; overflow: hidden;
   aspect-ratio: 16 / 9;
+  width: 100%;
 }
-.video-shell video { width: 100%; height: 100%; display: block; background: #000; }
+/* The <video> fills the shell; object-fit controls fit WITHOUT distortion.
+   Default 'contain' shows the whole frame (letterbox); 'cover' fills+crops.
+   We never set non-uniform scaling, so the source is never stretched. */
+.video-shell video {
+  width: 100%; height: 100%; display: block; background: #000;
+  object-fit: contain;
+}
+.video-shell[data-fit="cover"] video { object-fit: cover; }
+.video-shell[data-fit="contain"] video { object-fit: contain; }
+
+/* Aspect-ratio = DISPLAY CONTAINER shape only (not a source edit). 'auto' lets
+   the shell keep 16:9 but object-fit:contain reveals the true video shape. */
+.video-shell[data-ratio="16/9"] { aspect-ratio: 16 / 9; }
+.video-shell[data-ratio="4/3"]  { aspect-ratio: 4 / 3; }
+.video-shell[data-ratio="auto"] { aspect-ratio: 16 / 9; }  /* frame; contain shows real shape */
+
+.video-shell.is-fullscreen { border-radius: 0; aspect-ratio: auto; height: 100%; }
+.video-shell.is-fullscreen video { object-fit: contain; }
 .video-overlay {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  color: #cbd3e6; pointer-events: none; font-size: 14px;
+  color: #e8e0d3; pointer-events: none; font-size: 14px;
 }
 
 .media-state {
-  margin: 10px 0; font-size: 13px; color: #9aa4bf;
+  margin: 10px 0; font-size: 13px; color: var(--muted);
   display: inline-block; padding: 3px 10px; border-radius: 999px;
-  background: rgba(139, 147, 167, 0.12);
+  background: var(--surface-2);
 }
-.media-state[data-state="ready"] { color: #7ee0a2; }
-.media-state[data-state="playing"] { color: #7ee0a2; }
-.media-state[data-state="error"] { color: #ff6b6b; background: rgba(255, 107, 107, 0.12); }
-.media-state[data-state="loading"] { color: #ffd479; }
+.media-state[data-state="ready"] { color: var(--good); }
+.media-state[data-state="playing"] { color: var(--good); }
+.media-state[data-state="error"] { color: var(--bad); background: rgba(176, 69, 47, 0.10); }
+.media-state[data-state="loading"] { color: var(--warn); }
 
 .controls {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px;
 }
 .ctl {
-  background: #2b3350; color: #e6ebff; border: none; border-radius: 8px;
+  background: var(--accent); color: #ffffff; border: none; border-radius: 8px;
   padding: 8px 14px; cursor: pointer; font-size: 15px; line-height: 1;
+  transition: background var(--mo-fast) var(--ease-out),
+              transform var(--mo-fast) var(--ease-out),
+              box-shadow var(--mo-fast) var(--ease-out);
 }
 .ctl.small { padding: 8px 10px; font-size: 13px; }
 .ctl:disabled { opacity: 0.4; cursor: not-allowed; }
-.ctl:not(:disabled):hover { background: #343d61; }
+.ctl:not(:disabled):hover { background: #2a4a78; }
+.ctl:not(:disabled):active { transform: translateY(1px) scale(0.985); }   /* press feedback */
 
-.seek { flex: 1; min-width: 160px; accent-color: #6ea8fe; cursor: pointer; }
+.seek { flex: 1; min-width: 160px; accent-color: var(--accent); cursor: pointer; }
 .seek:disabled { cursor: not-allowed; opacity: 0.5; }
 
-.time { font-variant-numeric: tabular-nums; font-size: 13px; color: #cbd3e6; min-width: 96px; }
-.rate { font-size: 13px; color: #9aa4bf; display: inline-flex; gap: 6px; align-items: center; }
-.rate select { background: #2b3350; color: #e6ebff; border: none; border-radius: 6px; padding: 5px 8px; }
+.time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--text); min-width: 96px; }
+.rate { font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+.rate select { background: #ffffff; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
 
-.player-msg.err { color: #ff6b6b; margin-top: 10px; min-height: 1.2em; }
+.player-msg.err { color: var(--bad); margin-top: 10px; min-height: 1.2em; }
 
 /* Transcript search panel (G2.3) */
-.transcript-panel { margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(139,147,167,0.2); }
+.transcript-panel { margin-top: 18px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
 .tp-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 8px; }
-.tp-head .err { color: #ff6b6b; }
+.tp-head .err { color: var(--bad); }
 .tp-process { margin-bottom: 10px; }
 .tp-row { display: flex; gap: 8px; margin: 6px 0; }
 .tp-row input[type="text"] {
-  flex: 1; background: #1b2136; color: #e6ebff; border: 1px solid #2b3350;
+  flex: 1; background: #ffffff; color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 8px 10px; font-size: 13px;
 }
 .tp-row input:disabled { opacity: 0.5; }
 .tp-results { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .tp-hit {
   display: flex; gap: 10px; text-align: left; width: 100%;
-  background: #1b2136; border: 1px solid #2b3350; border-radius: 8px;
-  padding: 8px 10px; cursor: pointer; color: #e6ebff; font-size: 13px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; cursor: pointer; color: var(--text); font-size: 13px;
+  transition: background var(--mo-fast) var(--ease-out),
+              border-color var(--mo-fast) var(--ease-out),
+              outline-color var(--mo-fast) var(--ease-out);
 }
-.tp-hit:hover { background: #242c47; border-color: #6ea8fe; }
-.tp-time { color: #6ea8fe; font-variant-numeric: tabular-nums; min-width: 56px; }
-.tp-text { color: #cbd3e6; }
+.tp-hit:hover { background: #ded2c0; border-color: var(--accent); }
+.tp-time { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 56px; }
+.tp-text { color: var(--text); }
 
 /* Progress bar + progressive transcript list (UX upgrade) */
-.tp-barwrap { height: 8px; background: #1b2136; border-radius: 999px; overflow: hidden; margin: 8px 0; }
-.tp-bar { height: 100%; width: 0; background: #6ea8fe; transition: width 0.3s ease; }
-.tp-bar[data-stage="extracting"] { background: #ffd479; }
-.tp-bar[data-stage="transcribing"] { background: #6ea8fe; }
-.tp-bar[data-stage="ready"] { background: #7ee0a2; }
-.tp-bar[data-stage="failed"] { background: #ff6b6b; }
+.tp-barwrap { height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 8px 0; }
+.tp-bar { height: 100%; width: 0; background: var(--accent); transition: width 0.3s ease; }
+.tp-bar[data-stage="extracting"] { background: var(--warn); }
+.tp-bar[data-stage="transcribing"] { background: var(--accent); }
+.tp-bar[data-stage="ready"] { background: var(--good); }
+.tp-bar[data-stage="failed"] { background: var(--bad); }
 
 .tp-list {
   margin-top: 10px; max-height: 300px; overflow-y: auto;
@@ -106,11 +406,15 @@
 .tp-seg {
   display: flex; gap: 10px; text-align: left; width: 100%;
   background: transparent; border: 1px solid transparent; border-radius: 6px;
-  padding: 6px 8px; cursor: pointer; color: #cbd3e6; font-size: 13px;
+  padding: 6px 8px; cursor: pointer; color: var(--text); font-size: 13px;
+  /* Restrained highlight transition — background/color only, no pulse/flash. */
+  transition: background var(--mo-fast) var(--ease-out),
+              border-color var(--mo-fast) var(--ease-out);
 }
-.tp-seg:hover { background: #1b2136; }
-.tp-seg.active { background: #243154; border-color: #6ea8fe; color: #e6ebff; }
-.tp-seg .tp-time { color: #6ea8fe; font-variant-numeric: tabular-nums; min-width: 56px; }
+.tp-seg:hover { background: var(--surface-2); }
+.tp-seg:active { background: #ded2c0; }
+.tp-seg.active { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.tp-seg .tp-time { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 56px; }
 
 /* Recent lectures (D-refresh reattach) */
 .recent { margin-top: 18px; }
@@ -118,81 +422,348 @@
 .recent-list { display: flex; flex-direction: column; gap: 4px; }
 .recent-item {
   display: flex; justify-content: space-between; gap: 10px; width: 100%;
-  background: #1b2136; border: 1px solid #2b3350; border-radius: 8px;
-  padding: 8px 12px; cursor: pointer; color: #e6ebff; font-size: 13px; text-align: left;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; cursor: pointer; color: var(--text); font-size: 13px; text-align: left;
 }
-.recent-item:hover { background: #242c47; border-color: #6ea8fe; }
+.recent-item { transition: background var(--mo-fast) var(--ease-out), border-color var(--mo-fast) var(--ease-out); }
+.recent-item:hover { background: #ded2c0; border-color: var(--accent); }
+.recent-item:active { transform: scale(0.99); }
 .recent-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent-stage { color: #9aa4bf; font-variant-numeric: tabular-nums; }
+.recent-stage { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* Search occurrence navigation */
 .tp-nav { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
-.tp-counter { font-size: 12px; color: #9aa4bf; font-variant-numeric: tabular-nums; min-width: 56px; }
-.ctl.scanning { background: #3a2a52; border-color: #9d7bff; color: #e6ebff; }
+.tp-counter { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 56px; }
+.ctl.scanning { background: #2a4a78; color: #ffffff; }
 
 /* Three states for search-result rows:
    1) ordinary row = base .tp-hit style
    2) unselected match = subtle left accent
    3) selected occurrence = high-contrast outline + marker (not color alone) */
-.tp-hit { border-left: 3px solid #2b3350; }            /* unselected match: subtle */
+.tp-hit { border-left: 3px solid var(--border); }      /* unselected match: subtle */
 .tp-hit.selected {
-  background: #18324f;
-  outline: 2px solid #8ec5ff;                          /* non-color cue: visible outline */
+  background: var(--accent-soft);
+  outline: 2px solid var(--accent);                     /* non-color cue: visible outline */
   outline-offset: -2px;
-  border-left: 3px solid #8ec5ff;
-  color: #ffffff;
+  border-left: 3px solid var(--accent);
+  color: var(--text);
   font-weight: 600;
 }
-.tp-hit.selected .tp-time::before { content: '▶ '; color: #8ec5ff; }  /* marker, not color-only */
+.tp-hit.selected .tp-time::before { content: '▶ '; color: var(--accent); }  /* marker, not color-only */
 
 /* Looper voice panel (G3.1 local wake-word) */
-.looper-panel { margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(139,147,167,0.2); }
+.looper-panel { margin-top: 18px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
 .looper-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
-.looper-head .pill { padding: 3px 10px; border-radius: 999px; background: rgba(139,147,167,0.15); font-size: 12px; }
-.looper-head .pill[data-s="listening"] { color: #7ee0a2; }
-.looper-head .pill[data-s="activated"] { color: #ffd479; }
-.looper-head .pill[data-s="error"] { color: #ff6b6b; }
+.looper-head .pill { padding: 3px 10px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 12px; }
+.looper-head .pill[data-s="listening"] { color: var(--good); }
+.looper-head .pill[data-s="activated"] { color: var(--warn); }
+.looper-head .pill[data-s="error"] { color: var(--bad); }
 .looper-row { display: flex; gap: 12px; align-items: center; margin: 8px 0; }
-.ww-meter { flex: 1; height: 8px; background: #1b2136; border-radius: 999px; overflow: hidden; }
-.ww-meter-fill { height: 100%; width: 0; background: #6ea8fe; transition: width 0.08s linear; }
-.ww-activated { margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: #2d2a12; color: #ffd479; border: 1px solid #6e5f1f; }
-.ww-score { font-size: 12px; color: #9aa4bf; font-variant-numeric: tabular-nums; min-width: 64px; }
+.ww-meter { flex: 1; height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+.ww-meter-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.08s linear; }
+.ww-activated { margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: var(--looper-soft); color: #7a5a1a; border: 1px solid #e0d2b4; }
+.ww-score { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 64px; }
 
 /* Looper live conversation (G3.2) */
-.looper-convo { margin-top: 10px; border-top: 1px dashed rgba(139,147,167,0.2); padding-top: 10px; }
+.looper-convo { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
 .convo-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
-.convo-head .pill { padding: 3px 10px; border-radius: 999px; background: rgba(139,147,167,0.15); font-size: 12px; }
-.convo-head .pill[data-s="live"] { color: #7ee0a2; }
-.convo-head .pill[data-s="speaking"] { color: #9d7bff; }
-.convo-head .pill[data-s="connecting"] { color: #ffd479; }
-.convo-head .pill[data-s="error"] { color: #ff6b6b; }
-.ctl.danger { background: #5a2b2b; }
-.ctl.danger:hover { background: #6e3434; }
-.convo-log { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-.convo-row { padding: 6px 10px; border-radius: 8px; font-size: 13px; }
-.convo-row.you { background: #1b2136; color: #cbd3e6; }
-.convo-row.looper { background: #241f3a; color: #e6ebff; }
-.convo-row.system { background: rgba(255,107,107,0.12); color: #ff6b6b; }
+.convo-head .pill { padding: 3px 10px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 12px; }
+.convo-head .pill[data-s="live"] { color: var(--good); }
+.convo-head .pill[data-s="speaking"] { color: var(--accent); background: var(--accent-soft); }
+.convo-head .pill[data-s="connecting"] { color: var(--warn); }
+.convo-head .pill[data-s="error"] { color: var(--bad); }
+.ctl.danger { background: #B0452F; color: #ffffff; }
+.ctl.danger:hover { background: #943926; }
+.convo-log { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 2px; }
+
+/* Chat bubbles — warm academic. Preserve whitespace/line breaks from streamed
+   text so punctuation, spacing, and paragraph breaks render faithfully. */
+.convo-row {
+  padding: 8px 12px; border-radius: 10px; font-size: 13.5px; line-height: 1.5;
+  max-width: 92%; white-space: pre-wrap; word-break: break-word;
+  border: 1px solid transparent;
+  /* Restrained entrance when a NEW bubble is added (not per token — streaming
+     updates the same bubble's text node, which does not re-trigger this). */
+  animation: bubble-in var(--mo-panel) var(--ease-out);
+}
+@keyframes bubble-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+.convo-row .who { font-weight: 600; font-size: 12px; opacity: 0.75; margin-right: 2px; }
+.convo-row.you { background: var(--accent-soft); color: var(--text); align-self: flex-end; border-color: #c7d6ee; }
+.convo-row.looper { background: var(--looper-soft); color: var(--text); align-self: flex-start; border-color: #e6dcc9; }
+.convo-row.system { background: rgba(176,69,47,0.08); color: var(--bad); align-self: stretch; border-color: rgba(176,69,47,0.25); }
+
+/* Provisional user transcript: shown before the final STT arrives. Distinct
+   from finalized input via reduced emphasis + a caret, no fabricated text. */
+.convo-row.you.provisional { opacity: 0.72; font-style: italic; }
+.convo-row.you.provisional .who::after { content: ' 🎙'; font-style: normal; }
+
+/* Looper still streaming: a subtle, non-animated caret marks the live bubble. */
+.convo-row.looper.streaming::after {
+  content: '▍'; color: var(--accent); margin-left: 1px; opacity: 0.6;
+}
+/* Leading-edge highlight: the newest streamed chunk, as it arrives. A reading
+   aid that tracks transcript arrival (NOT word-to-audio alignment — no
+   timestamps exist). Settles to normal as the next chunk arrives. */
+.convo-row.looper .live-token {
+  background: var(--accent-soft); border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(52,91,145,0.12);
+  transition: background var(--mo-menu) var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) { .convo-row.looper .live-token { transition: none; } }
+/* Interrupted (barge-in / stopped) response: mark it honestly. */
+.convo-row.looper.interrupted { border-color: var(--warn); }
+.convo-row.looper.interrupted::after { content: ' — interrupted'; color: var(--warn); font-size: 11px; font-style: italic; }
+
+/* Looper responsiveness indicators. All are small, contained to the convo head,
+   and never move the video. Driven by data-speaking / data-thinking on the head. */
+
+/* Speaking: a restrained 3-bar waveform (gentle, slow, low-contrast). */
+.speaking-dot { display: none; align-items: flex-end; gap: 2px; height: 12px; margin-left: 4px; }
+.convo-head[data-speaking="1"] .speaking-dot { display: inline-flex; }
+.speaking-dot::before, .speaking-dot::after, .speaking-dot > i {
+  content: ''; display: block; width: 3px; height: 5px; border-radius: 2px; background: var(--accent);
+}
+.speaking-dot > i { height: 10px; }
+.convo-head[data-speaking="1"] .speaking-dot::before { animation: wave 900ms var(--ease-out) infinite; }
+.convo-head[data-speaking="1"] .speaking-dot > i { animation: wave 900ms var(--ease-out) infinite 150ms; }
+.convo-head[data-speaking="1"] .speaking-dot::after { animation: wave 900ms var(--ease-out) infinite 300ms; }
+@keyframes wave { 0%, 100% { transform: scaleY(0.5); } 50% { transform: scaleY(1.4); } }
+
+/* Thinking: three small dots that fade in sequence (discreet, not bouncing). */
+.thinking-dots { display: none; gap: 3px; margin-left: 4px; }
+.convo-head[data-thinking="1"] .thinking-dots { display: inline-flex; }
+.thinking-dots span { width: 4px; height: 4px; border-radius: 50%; background: var(--muted); opacity: 0.4; }
+.convo-head[data-thinking="1"] .thinking-dots span:nth-child(1) { animation: think 1.1s ease-in-out infinite; }
+.convo-head[data-thinking="1"] .thinking-dots span:nth-child(2) { animation: think 1.1s ease-in-out infinite 180ms; }
+.convo-head[data-thinking="1"] .thinking-dots span:nth-child(3) { animation: think 1.1s ease-in-out infinite 360ms; }
+@keyframes think { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+/* Reduced-motion: the global rule neutralizes these animations; keep the
+   indicators visible as static shapes so status is still communicated. */
+@media (prefers-reduced-motion: reduce) {
+  .speaking-dot::before, .speaking-dot > i, .speaking-dot::after,
+  .thinking-dots span { transform: none !important; opacity: 0.8 !important; }
+}
 
 /* Bookmarks (G5 "Remember") */
-.bm-panel { margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(139,147,167,0.2); }
+.bm-panel { margin-top: 18px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
 .bm-head { font-weight: 600; margin-bottom: 8px; }
 .bm-row { display: flex; gap: 8px; }
-.bm-row input { flex: 1; background: #1b2136; color: #e6ebff; border: 1px solid #2b3350; border-radius: 8px; padding: 8px 10px; font-size: 13px; }
-.bm-msg { min-height: 1.1em; font-size: 12px; margin: 6px 0; color: #9aa4bf; }
-.bm-msg.ok { color: #7ee0a2; } .bm-msg.err { color: #ff6b6b; }
+.bm-row input { flex: 1; background: #ffffff; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+.bm-msg { min-height: 1.1em; font-size: 12px; margin: 6px 0; color: var(--muted); }
+.bm-msg.ok { color: var(--good); } .bm-msg.err { color: var(--bad); }
 .bm-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
-.bm-item { display: flex; gap: 8px; align-items: center; width: 100%; background: #1b2136; border: 1px solid #2b3350; border-radius: 8px; padding: 6px 8px; color: #e6ebff; font-size: 13px; }
-.bm-item:hover { border-color: #6ea8fe; }
+.bm-item { display: flex; gap: 8px; align-items: center; width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; color: var(--text); font-size: 13px;
+  transition: border-color var(--mo-fast) var(--ease-out), background var(--mo-fast) var(--ease-out);
+  /* Restrained insertion when a newly-saved bookmark appears in the list. */
+  animation: bm-in var(--mo-panel) var(--ease-out);
+}
+@keyframes bm-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.bm-item:hover { border-color: var(--accent); }
+/* Brief, non-celebratory confirmation flash AFTER the backend confirms a save. */
+.bm-item.just-saved { animation: bm-saved 1.1s var(--ease-out); }
+@keyframes bm-saved {
+  0% { background: var(--accent-soft); border-color: var(--accent); }
+  100% { background: var(--surface-2); border-color: var(--border); }
+}
 .bm-open { display: flex; gap: 10px; align-items: center; text-align: left; flex: 1 1 auto;
   background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 2px 4px; border-radius: 6px; }
-.bm-open:hover { background: #242c47; }
+.bm-open:hover { background: #ded2c0; }
 .bm-actions { display: flex; gap: 6px; flex: 0 0 auto; }
-.bm-time { color: #6ea8fe; font-variant-numeric: tabular-nums; min-width: 56px; }
-.bm-ex { color: #9aa4bf; }
+.bm-time { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 56px; }
+.bm-ex { color: var(--muted); }
 
 /* Pending (voice-proposed) bookmarks — visually distinct from saved */
 .bm-pending { margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
 .bm-prop { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-  background: #2d2a12; border: 1px dashed #6e5f1f; color: #ffd479; border-radius: 8px; padding: 8px 10px; font-size: 13px; }
-.bm-prop strong { color: #ffe9a8; }
+  background: var(--looper-soft); border: 1px dashed #d8c7a6; color: #7a5a1a; border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+.bm-prop strong { color: #5f4612; }
+
+/* ===================================================================== */
+/* Responsive: collapse rails progressively instead of crushing center.  */
+/* The toggles still work at any size; these are sensible defaults.       */
+/* ===================================================================== */
+
+/* Below ~1200px: stack the right Looper rail under the center column so */
+/* the video + transcript keep a usable width. Left rail stays if wide.  */
+@media (max-width: 1200px) {
+  .workspace {
+    grid-template-columns: var(--left-w, 220px) minmax(0, 1fr);
+    height: auto;                      /* let the page scroll when stacked */
+  }
+  .ws-right {
+    grid-column: 1 / -1;               /* full width, below center */
+    height: auto; max-height: 80vh;
+  }
+  .ws-center { height: auto; }
+  .ws-center .transcript-panel { min-height: 220px; }
+  .ws-center .transcript-panel .tp-list { max-height: 320px; }
+  /* Bound the SCROLL container (not .convo-log) so the chat actually scrolls
+     when the rail has auto height on laptops — issue 5 root cause. */
+  .ws-right .convo-scroll { max-height: 300px; }
+}
+
+/* Below ~820px: single column. Left rail collapses above the content;    */
+/* nothing is crushed — everything stacks and the page scrolls.           */
+@media (max-width: 820px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .ws-left { grid-column: 1 / -1; height: auto; }
+  .ws-left .rail-body { flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .rail-links { margin-top: 0; border-top: none; padding-top: 0; }
+  .learn-main { padding: 14px 12px 32px; }
+}
+
+/* Honor reduced-motion: no smooth-scroll jank for users who opt out. */
+@media (prefers-reduced-motion: reduce) {
+  .tp-bar, .ww-meter-fill { transition: none; }
+}
+
+/* ===================================================================== */
+/* Phase 3 — player display-settings menu, segmented controls, follow     */
+/* toggle, and accessible focus indicators.                               */
+/* ===================================================================== */
+
+/* Display-settings popover (progressive disclosure). */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu {
+  position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 30;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px; min-width: 230px; box-shadow: 0 6px 20px rgba(48,44,38,0.12);
+  display: flex; flex-direction: column; gap: 12px;
+  /* Small-menu entrance: fade + slight rise. Driven by .hidden toggle below. */
+  transition: opacity var(--mo-menu) var(--ease-out), transform var(--mo-menu) var(--ease-out);
+}
+/* Animate open: because display:none can't transition, we keep the element in
+   flow via visibility and animate opacity/transform. .hidden sets the closed
+   state; removing it opens. (JS toggles .hidden, unchanged.) */
+.menu.hidden { display: flex !important; opacity: 0; transform: translateY(6px); visibility: hidden; pointer-events: none; }
+.menu:not(.hidden) { opacity: 1; transform: translateY(0); visibility: visible; }
+.menu-section { display: flex; flex-direction: column; gap: 6px; }
+.menu-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg-btn {
+  flex: 1 1 auto; background: var(--panel); color: var(--text); border: none;
+  padding: 7px 10px; font-size: 12px; cursor: pointer; border-right: 1px solid var(--border);
+  transition: background var(--mo-fast) var(--ease-out), color var(--mo-fast) var(--ease-out);
+}
+.seg-btn:last-child { border-right: none; }
+.seg-btn:hover { background: var(--surface-2); }
+.seg-btn:active { transform: scale(0.97); }
+.seg-btn.sel, .seg-btn[aria-checked="true"] {
+  background: var(--accent); color: #ffffff; font-weight: 600;
+}
+
+/* Transcript-follow toggle. */
+.follow-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--muted); cursor: pointer; }
+.follow-toggle input { accent-color: var(--accent); cursor: pointer; }
+.tp-head { flex-wrap: wrap; }
+
+/* Accessible, visible focus indicators (WCAG 2.2) — a clear non-color ring. */
+.learn-body :is(button, a, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Fullscreen: keep controls usable where the browser lets us style them.
+   (Native fullscreen on the shell shows the <video>; our overlay stays above.) */
+.video-shell.is-fullscreen { background: #000; }
+
+/* ===================================================================== */
+/* Voice activity cue card — rounded white card with a tinted circular     */
+/* icon disc, inside the Looper chat panel. One cue at a time. Per-state    */
+/* accent (teal/blue/purple/green/indigo). Subtle motion; reduced-motion    */
+/* neutralized. Meaning never relies on color alone (distinct icon+label).  */
+/* ===================================================================== */
+.cue-card-strip {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  margin: 0 14px 10px; padding: 9px 12px; border-radius: 12px;
+  background: #ffffff; border: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(48,44,38,0.04);
+  font-size: 13px; color: var(--text);
+  animation: cue-in var(--mo-panel) var(--ease-out);
+}
+@keyframes cue-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Circular tinted icon disc. --cue-accent/--cue-soft set per kind below. */
+.cue-disc {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--cue-soft, #eef1f4); color: var(--cue-accent, #345B91);
+}
+.cue-disc svg { display: block; }
+.cue-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.cue-line { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cue-label { color: var(--text); font-weight: 500; }
+.cue-sub { font-size: 11px; color: var(--muted); }
+.cue-sub:empty { display: none; }
+.cue-extra { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cue-extra:empty { display: none; }
+
+/* Per-state accent mapping (disc color + soft background). */
+.cue-card-strip[data-kind="listening"]  { --cue-accent:#2f9e8f; --cue-soft:#e3f3f0; }  /* teal/green */
+.cue-card-strip[data-kind="retrieving"] { --cue-accent:#345B91; --cue-soft:#e4ecf7; }  /* blue */
+.cue-card-strip[data-kind="preparing"]  { --cue-accent:#7a5cc0; --cue-soft:#efe9f8; }  /* purple */
+.cue-card-strip[data-kind="speaking"]   { --cue-accent:#3b53b5; --cue-soft:#e7e9fa; }  /* indigo */
+.cue-card-strip[data-kind="action"]     { --cue-accent:#2F7D5B; --cue-soft:#e3f1ea; }  /* green */
+/* Success/error tone overrides the disc without losing the state accent. */
+.cue-card-strip[data-tone="ok"]  .cue-disc { background:#e3f1ea; color:#2F7D5B; }
+.cue-card-strip[data-tone="err"] .cue-disc { background:#f6e4df; color:#B0452F; }
+
+/* Waveform (listening/speaking) — restrained bars in the disc accent. */
+.cue-wave { display: none; align-items: center; gap: 2px; height: 16px; }
+.cue-wave.on { display: inline-flex; }
+.cue-wave i { width: 3px; height: 6px; border-radius: 2px; background: var(--cue-accent, #345B91); opacity: 0.85; }
+.cue-wave.on i:nth-child(odd)  { animation: cwave 760ms var(--ease-out) infinite; }
+.cue-wave.on i:nth-child(even) { animation: cwave 760ms var(--ease-out) infinite 130ms; }
+.cue-wave.on i:nth-child(3) { animation-delay: 60ms; }
+.cue-wave.on i:nth-child(5) { animation-delay: 200ms; }
+.cue-wave.on i:nth-child(7) { animation-delay: 300ms; }
+@keyframes cwave { 0%,100% { height: 5px; } 50% { height: 15px; } }
+
+/* Four-dot progress (retrieving/preparing) — fills then fades in sequence. */
+.cue-dots { display: none; gap: 4px; }
+.cue-dots.on { display: inline-flex; }
+.cue-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--cue-accent, #7a5cc0); opacity: 0.25; }
+.cue-dots.on i:nth-child(1) { animation: cdot 1.3s ease-in-out infinite; }
+.cue-dots.on i:nth-child(2) { animation: cdot 1.3s ease-in-out infinite 180ms; }
+.cue-dots.on i:nth-child(3) { animation: cdot 1.3s ease-in-out infinite 360ms; }
+.cue-dots.on i:nth-child(4) { animation: cdot 1.3s ease-in-out infinite 540ms; }
+@keyframes cdot { 0%,100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+/* Green spinner ring while an action is in progress. */
+.cue-spin { display: none; width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid var(--cue-soft, #e3f1ea); border-top-color: var(--cue-accent, #2F7D5B);
+  animation: cspin 700ms linear infinite; }
+.cue-spin.on { display: inline-block; }
+@keyframes cspin { to { transform: rotate(360deg); } }
+
+/* "Ready" badge after an interruption actually stopped playback. */
+.cue-badge { font-size: 11px; font-weight: 600; color: #2f9e8f;
+  background: #e3f3f0; border: 1px solid #c6e6df; border-radius: 999px; padding: 2px 9px; }
+
+/* Rich retrieval reveal card: [thumb] [ time·concept / sub ] [chevron]. */
+.cue-reveal {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px; cursor: pointer; text-align: left;
+  transition: border-color var(--mo-fast) var(--ease-out), background var(--mo-fast) var(--ease-out);
+}
+.cue-reveal:hover { border-color: var(--accent); background: var(--accent-soft); }
+.cue-thumb {
+  flex: 0 0 auto; width: 56px; height: 36px; border-radius: 6px;
+  background: #11161f center/cover no-repeat; color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; overflow: hidden;
+}
+.cue-thumb.has-img { color: rgba(255,255,255,0.92); text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+.cue-reveal-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.cue-reveal-title { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cue-reveal-title b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.cue-reveal-sub { font-size: 11px; color: var(--muted); }
+.cue-chevron { flex: 0 0 auto; color: var(--muted); display: inline-flex; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cue-wave.on i, .cue-dots.on i { animation: none !important; height: 8px !important; opacity: 0.8 !important; }
+  .cue-spin { animation: none !important; }
+  .cue-card-strip { animation: none !important; }
+}
