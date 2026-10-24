@@ -2595,4 +2595,12 @@ async function reattachLecture(lec) {
 }
 
 // Expose a tiny hook for diagnostics (not required by the app).
+document.querySelectorAll('#avatarStudyLink, #studyBuddyLink').forEach((link) => {
+  link.addEventListener('click', () => {
+    link.href = currentVideoId
+      ? `/revise.html?lecture=${encodeURIComponent(currentVideoId)}`
+      : '/revise.html';
+  });
+});
+
 window.__learnloop = { player, formatTime, seek: (t) => player.seekTo(t), highlightCurrent, csp };

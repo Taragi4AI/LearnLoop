@@ -20,3 +20,6 @@ numpy==2.5.4
 
 # VG-1 verification harness (Realtime WS client; also used by future live assistant)
 websockets==17.3
+
+# Higgs Avatar realtime video (LiveKit audio-stream protocol)
+livekit-agents==1.8.8

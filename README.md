@@ -1,4 +1,10 @@
-# Higgs API Playground
+# LearnLoop
+
+The lecture player is at <http://localhost:3000/learn.html>. Its **Live avatar study buddy** link opens <http://localhost:3000/revise.html>, where you can choose a processed lecture for a viva, free discussion, or timed quiz with a lip-synced Higgs avatar. The page can also build and export a study pack.
+
+To run this branch, install the Python packages in `requirements-dev.txt` and the JavaScript packages in `package.json`, then start the FastAPI server with `python server_fastapi.py`. Keep the server terminal open while using the site. Set `BOSON_API_KEY` in `.env`; for live avatar video also set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` from the same LiveKit Cloud project. See `.env.example` for the names. The API keys remain on the server.
+
+## Higgs API Playground
 
 A full-stack playground that exercises **every Boson AI (Higgs) developer API** behind one UI:
 
