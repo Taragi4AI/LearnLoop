@@ -459,3 +459,50 @@ def test_bookmark_delete_404_unknown(seeded_app):
     vid = seeded_app["video_id"]
     status, _, _ = hc.delete(seeded_app["base"] + f"/api/lectures/{vid}/bookmarks/nope999")
     assert status == 404
+
+
+# --- Screenshot routes ---
+def _create_screenshot(seeded_app, ts=5.0, title="frame1"):
+    vid = seeded_app["video_id"]
+    status, _, body = hc.post(
+        seeded_app["base"] + f"/api/lectures/{vid}/screenshots",
+        json_body={"image_data": "dGVzdA==", "timestamp_seconds": ts, "title": title},
+    )
+    assert status == 200, body
+    return hc.as_json(body)
+
+def test_screenshot_create_and_list(seeded_app):
+    vid = seeded_app["video_id"]
+    ss = _create_screenshot(seeded_app, ts=7.0, title="test frame")
+    assert ss["id"] and ss["timestamp_seconds"] == 7.0
+    s2, _, b2 = hc.get(seeded_app["base"] + f"/api/lectures/{vid}/screenshots")
+    assert s2 == 200
+    data = hc.as_json(b2)
+    assert data["count"] >= 1
+    assert any(x["id"] == ss["id"] for x in data["screenshots"])
+
+def test_screenshot_image_route(seeded_app):
+    import base64
+    vid = seeded_app["video_id"]
+    ss = _create_screenshot(seeded_app, ts=3.0)
+    s, _, b = hc.get(seeded_app["base"] + f"/api/lectures/{vid}/screenshots/{ss['id']}/image")
+    assert s == 200
+    assert b == base64.b64decode("dGVzdA==")   # raw bytes match
+
+def test_screenshot_delete_route(seeded_app):
+    vid = seeded_app["video_id"]
+    ss = _create_screenshot(seeded_app, ts=9.0)
+    s, _, b = hc.delete(seeded_app["base"] + f"/api/lectures/{vid}/screenshots/{ss['id']}")
+    assert s == 200 and hc.as_json(b)["deleted"] is True
+    s2, _, _ = hc.get(seeded_app["base"] + f"/api/lectures/{vid}/screenshots/{ss['id']}/image")
+    assert s2 == 404
+
+def test_screenshot_missing_image_data_rejected(seeded_app):
+    vid = seeded_app["video_id"]
+    s, _, _ = hc.post(seeded_app["base"] + f"/api/lectures/{vid}/screenshots",
+                      json_body={"timestamp_seconds": 1.0})
+    assert s == 400
+
+def test_screenshot_404_unknown_lecture(seeded_app):
+    s, _, _ = hc.get(seeded_app["base"] + "/api/lectures/nope999/screenshots")
+    assert s == 404

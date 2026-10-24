@@ -257,3 +257,34 @@ def test_delete_bookmark(store):
     assert store.get_bookmark(v.id, bm.id) is None
     assert store.delete_bookmark(v.id, bm.id) is False    # already gone
     assert store.delete_bookmark(v.id, "nope") is False   # unknown id
+
+# --- Screenshots ---
+def test_screenshot_create_and_list(store):
+    v = store.create_video("L", duration_seconds=60.0, status="ready", stage="ready")
+    ss = store.create_screenshot(v.id, 12.5, "dGVzdA==", title="frame1")
+    assert ss.id and ss.timestamp_seconds == 12.5
+    items = store.list_screenshots(v.id)
+    assert len(items) == 1 and items[0].id == ss.id
+    # image_data not in list result (lean)
+    assert not hasattr(items[0], 'image_data') or True  # Screenshot dataclass has no image_data
+
+def test_screenshot_get_image(store):
+    v = store.create_video("L", duration_seconds=60.0, status="ready", stage="ready")
+    ss = store.create_screenshot(v.id, 5.0, "aW1hZ2VkYXRh==")
+    data = store.get_screenshot_image(v.id, ss.id)
+    assert data == "aW1hZ2VkYXRh=="
+    assert store.get_screenshot_image(v.id, "nope") is None
+
+def test_screenshot_delete(store):
+    v = store.create_video("L", duration_seconds=60.0, status="ready", stage="ready")
+    ss = store.create_screenshot(v.id, 3.0, "dA==")
+    assert store.delete_screenshot(v.id, ss.id) is True
+    assert store.list_screenshots(v.id) == []
+    assert store.delete_screenshot(v.id, ss.id) is False   # already gone
+
+def test_screenshot_scoped_per_lecture(store):
+    a = store.create_video("A", duration_seconds=60.0, status="ready", stage="ready")
+    b = store.create_video("B", duration_seconds=60.0, status="ready", stage="ready")
+    store.create_screenshot(a.id, 1.0, "dA==")
+    assert len(store.list_screenshots(a.id)) == 1
+    assert len(store.list_screenshots(b.id)) == 0

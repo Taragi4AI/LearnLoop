@@ -767,3 +767,116 @@
   .cue-spin { animation: none !important; }
   .cue-card-strip { animation: none !important; }
 }
+
+/* ===================================================================== */
+/* Screenshot Capture — Capture moment + Study materials action row,      */
+/* Saved items panel with tabs (Screenshots / Bookmarks).                 */
+/* ===================================================================== */
+
+/* Action row: two buttons side by side directly below the player controls */
+.action-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 2px 4px 0;
+}
+/* SVG icon inside a button — 16px, aligns with text */
+.btn-ic { width: 16px; height: 16px; vertical-align: middle; margin-right: 5px; flex-shrink: 0; }
+
+/* Brief status message (success/error) to the right of the buttons */
+.action-msg { font-size: 12.5px; color: var(--good); min-height: 1em; }
+.action-msg.err { color: var(--bad); }
+
+/* Keep keyboard focus as clear as the visible hover treatment. */
+.action-row .ctl:focus-visible,
+.saved-tab:focus-visible,
+.ss-thumb:focus-visible {
+  outline: 3px solid rgba(52, 91, 145, 0.38);
+  outline-offset: 2px;
+}
+
+/* Saved items panel: white card with rounded corners, matching .transcript-panel */
+.saved-panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+}
+.saved-head {
+  padding: 10px 14px 0;
+  font-size: 13.5px; color: var(--text);
+}
+.saved-head strong { font-weight: 600; }
+
+/* Tabs — match the PNG's pill-style tab row */
+.saved-tabs {
+  display: flex; gap: 2px; padding: 8px 14px 0; border-bottom: 1px solid var(--border);
+}
+.saved-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px; font-size: 13px; border: none; border-radius: 8px 8px 0 0;
+  background: transparent; color: var(--muted); cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color var(--mo-fast) var(--ease-out), border-color var(--mo-fast) var(--ease-out);
+}
+.saved-tab:hover { color: var(--text); }
+.saved-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.saved-tab.active .btn-ic { stroke: var(--accent); }
+.tab-count {
+  font-size: 11px; font-weight: 700; color: #fff; background: var(--accent);
+  padding: 1px 6px; border-radius: 999px; min-width: 18px; text-align: center;
+}
+.saved-tab:not(.active) .tab-count { background: var(--surface-2); color: var(--muted); }
+
+/* Tab panes */
+.saved-pane { padding: 12px 14px; }
+.saved-pane.hidden { display: none; }
+
+/* Screenshot thumbnail grid — matches PNG: dark tiles, time badge, title */
+.ss-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.saved-empty { font-size: 13px; color: var(--muted); margin: 0; grid-column: 1/-1; }
+
+.ss-card {
+  display: flex; flex-direction: column; gap: 0;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+  overflow: hidden; cursor: pointer;
+  transition: border-color var(--mo-fast) var(--ease-out), box-shadow var(--mo-fast) var(--ease-out);
+}
+.ss-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(52,91,145,0.12); }
+
+/* Thumbnail area — dark, 16:9 aspect, shows the captured frame */
+.ss-thumb {
+  position: relative; aspect-ratio: 16/9; background: #111418;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; border: 0; padding: 0; width: 100%; cursor: zoom-in;
+}
+.ss-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Timestamp badge bottom-left, matching the PNG */
+.ss-ts {
+  position: absolute; bottom: 5px; left: 5px;
+  background: rgba(0,0,0,0.70); color: #fff;
+  font-size: 11px; font-variant-numeric: tabular-nums;
+  padding: 2px 6px; border-radius: 4px;
+}
+
+/* Card footer: title + delete */
+.ss-footer {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; background: var(--panel);
+}
+.ss-title {
+  flex: 1 1 auto; min-width: 0; background: transparent; border: 0; padding: 0;
+  font: inherit; font-size: 12px; color: var(--text); text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ss-title:hover { color: var(--accent); text-decoration: underline; }
+.ss-del {
+  flex: 0 0 auto; background: transparent; border: none; cursor: pointer;
+  color: var(--muted); padding: 2px 4px; border-radius: 4px; font-size: 13px; line-height: 1;
+  transition: color var(--mo-fast) var(--ease-out);
+}
+.ss-del:hover { color: var(--bad); }
+
+/* Bookmarks in the study panel — reuses .bm-item styles but in a list */
+.bm-list-study { display: flex; flex-direction: column; gap: 6px; }
+.bm-list-study .bm-item { animation: bm-in var(--mo-panel) var(--ease-out); }

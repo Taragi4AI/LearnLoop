@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_bookmarks_video ON bookmarks(video_id, timestamp_seconds);
+CREATE TABLE IF NOT EXISTS screenshots (
+    id TEXT PRIMARY KEY,
+    video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    timestamp_seconds REAL NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    transcript_excerpt TEXT,
+    image_data TEXT NOT NULL,   -- base64-encoded JPEG
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_screenshots_video ON screenshots(video_id, timestamp_seconds);
 """
 
 DURATION_TOLERANCE = 0.5  # seconds
@@ -92,6 +102,18 @@ class TranscriptSegment:
     text: str
 
 
+@dataclass
+class Screenshot:
+    id: str
+    video_id: str
+    timestamp_seconds: float
+    title: str
+    transcript_excerpt: str | None
+    created_at: str
+    # image_data is NOT included in the dataclass to keep list responses lean;
+    # the full base64 JPEG is fetched separately via get_screenshot_image().
+
+
 class Storage:
     def __init__(self, db_path: str | Path | None = None):
         self.db_path = Path(db_path) if db_path else DB_PATH
@@ -132,6 +154,17 @@ class Storage:
         if "stage" in newly_added:
             c.execute("UPDATE videos SET stage = status")
         c.execute("CREATE INDEX IF NOT EXISTS idx_videos_hash ON videos(content_hash)")
+        # screenshots table added after initial schema — create it if absent.
+        c.execute("""CREATE TABLE IF NOT EXISTS screenshots (
+            id TEXT PRIMARY KEY,
+            video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+            timestamp_seconds REAL NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            transcript_excerpt TEXT,
+            image_data TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_screenshots_video ON screenshots(video_id, timestamp_seconds)")
 
     # --- videos ---
     @staticmethod
@@ -369,6 +402,66 @@ class Storage:
             cur = c.execute("DELETE FROM bookmarks WHERE id=? AND video_id=?",
                             (bookmark_id, video_id))
             return cur.rowcount > 0
+
+    # --- screenshots -------------------------------------------------------
+    @staticmethod
+    def _row_to_screenshot(r) -> Screenshot:
+        return Screenshot(
+            id=r["id"], video_id=r["video_id"],
+            timestamp_seconds=r["timestamp_seconds"], title=r["title"] or "",
+            transcript_excerpt=r["transcript_excerpt"], created_at=r["created_at"],
+        )
+
+    def create_screenshot(self, video_id: str, timestamp_seconds: float,
+                          image_data: str, title: str = "",
+                          transcript_excerpt: str | None = None) -> Screenshot:
+        """Persist a JPEG frame capture (base64-encoded) with metadata."""
+        v = self.get_video(video_id)
+        if v is None:
+            raise StorageError(f"No such video: {video_id}")
+        if not image_data:
+            raise StorageError("image_data is required")
+        if not math.isfinite(timestamp_seconds) or timestamp_seconds < 0:
+            raise StorageError(f"Invalid timestamp: {timestamp_seconds}")
+        sid = uuid.uuid4().hex[:12]
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO screenshots "
+                "(id, video_id, timestamp_seconds, title, transcript_excerpt, image_data) "
+                "VALUES (?,?,?,?,?,?)",
+                (sid, video_id, float(timestamp_seconds),
+                 (title or "").strip(), transcript_excerpt, image_data),
+            )
+        return Screenshot(id=sid, video_id=video_id,
+                          timestamp_seconds=timestamp_seconds, title=(title or "").strip(),
+                          transcript_excerpt=transcript_excerpt,
+                          created_at="")   # created_at filled by DB default
+
+    def list_screenshots(self, video_id: str) -> list[Screenshot]:
+        with self._conn() as c:
+            rs = c.execute(
+                "SELECT id, video_id, timestamp_seconds, title, transcript_excerpt, created_at "
+                "FROM screenshots WHERE video_id=? ORDER BY timestamp_seconds",
+                (video_id,),
+            ).fetchall()
+        return [self._row_to_screenshot(r) for r in rs]
+
+    def get_screenshot_image(self, video_id: str, screenshot_id: str) -> str | None:
+        """Return just the base64 image_data for a screenshot."""
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT image_data FROM screenshots WHERE id=? AND video_id=?",
+                (screenshot_id, video_id),
+            ).fetchone()
+        return r["image_data"] if r else None
+
+    def delete_screenshot(self, video_id: str, screenshot_id: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM screenshots WHERE id=? AND video_id=?",
+                (screenshot_id, video_id),
+            )
+        return cur.rowcount > 0
 
     def search_segments(self, video_id: str, query: str) -> list[TranscriptSegment]:
         """Case-insensitive substring search over segment text, ordered by time."""

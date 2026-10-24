@@ -514,6 +514,81 @@ async def bookmark_delete(video_id: str, bookmark_id: str):
     return {"deleted": True, "id": bookmark_id, "exported": export_ok}
 
 
+@app.post("/api/lectures/{video_id}/screenshots")
+async def screenshot_create(video_id: str, request: Request):
+    """Save a captured video frame (base64 JPEG) with timestamp metadata.
+    Body: { image_data: '<base64 JPEG>', timestamp_seconds: number,
+            title?: string, transcript_excerpt?: string }.
+    Confirmed only after the DB write — never returns success speculatively."""
+    from app.storage import Storage, StorageError
+    body = await _json_body(request)
+    if body is _INVALID or not isinstance(body, dict):
+        return _bad_json()
+    image_data = (body.get("image_data") or "").strip()
+    if not image_data:
+        return JSONResponse(status_code=400, content={"error": {"message": "image_data (base64 JPEG) is required"}})
+    try:
+        ts = float(body.get("timestamp_seconds"))
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": {"message": "timestamp_seconds (number) required"}})
+    try:
+        store = Storage()
+        ss = store.create_screenshot(
+            video_id, ts, image_data,
+            title=body.get("title") or "",
+            transcript_excerpt=body.get("transcript_excerpt"),
+        )
+    except StorageError as e:
+        return JSONResponse(status_code=400, content={"error": {"message": str(e)}})
+    return {"id": ss.id, "video_id": ss.video_id,
+            "timestamp_seconds": ss.timestamp_seconds,
+            "title": ss.title, "transcript_excerpt": ss.transcript_excerpt,
+            "created_at": ss.created_at}
+
+
+@app.get("/api/lectures/{video_id}/screenshots")
+async def screenshot_list(video_id: str):
+    from app.storage import Storage
+    s = Storage()
+    if s.get_video(video_id) is None:
+        return JSONResponse(status_code=404, content={"error": {"message": "No such lecture"}})
+    items = s.list_screenshots(video_id)
+    return {"video_id": video_id, "count": len(items),
+            "screenshots": [{"id": i.id, "timestamp_seconds": i.timestamp_seconds,
+                              "title": i.title, "transcript_excerpt": i.transcript_excerpt,
+                              "created_at": i.created_at} for i in items]}
+
+
+@app.get("/api/lectures/{video_id}/screenshots/{screenshot_id}/image")
+async def screenshot_image(video_id: str, screenshot_id: str):
+    """Return the raw JPEG bytes for a screenshot (serves as <img src>)."""
+    from app.storage import Storage
+    import base64
+    store = Storage()
+    if store.get_video(video_id) is None:
+        return JSONResponse(status_code=404, content={"error": {"message": "No such lecture"}})
+    data = store.get_screenshot_image(video_id, screenshot_id)
+    if data is None:
+        return JSONResponse(status_code=404, content={"error": {"message": "No such screenshot"}})
+    try:
+        raw = base64.b64decode(data)
+        return Response(content=raw, media_type="image/jpeg")
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": {"message": "Corrupt image data"}})
+
+
+@app.delete("/api/lectures/{video_id}/screenshots/{screenshot_id}")
+async def screenshot_delete(video_id: str, screenshot_id: str):
+    from app.storage import Storage
+    store = Storage()
+    if store.get_video(video_id) is None:
+        return JSONResponse(status_code=404, content={"error": {"message": "No such lecture"}})
+    deleted = store.delete_screenshot(video_id, screenshot_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"error": {"message": "No such screenshot"}})
+    return {"deleted": True, "id": screenshot_id}
+
+
 @app.get("/api/lectures/{video_id}/context")
 async def lecture_context(video_id: str, t: float = 0.0, q: str = ""):
     """G4: assemble bounded, lecture-scoped grounding context for Looper.

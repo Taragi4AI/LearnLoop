@@ -116,6 +116,15 @@ G1_ASSETS = [
     ("/learn.js", "javascript", b"userStoppedExplicitly"),             # no auto-restart after explicit stop
     ("/learn.css", "css", b"max-height: 52vh"),                        # hard chat-scroll bound fallback
     ("/looper-realtime.js", "javascript", b"minutes: { type"),         # minutes/seconds seek path
+    # --- Screenshot / Study materials ---
+    ("/learn.html", "text/html", b'id="captureBtn"'),                  # Capture moment button
+    ("/learn.html", "text/html", b'id="studyBtn"'),                    # Study materials button
+    ("/learn.html", "text/html", b'id="savedPanel"'),                  # Saved items panel
+    ("/learn.html", "text/html", b'id="ssGrid"'),                      # Screenshot grid
+    ("/learn.js", "javascript", b"captureCurrentFrame"),               # canvas frame capture
+    ("/learn.js", "javascript", b"saveScreenshot"),                    # POST to /screenshots
+    ("/learn.js", "javascript", b"loadSavedScreenshots"),              # load + render grid
+    ("/learn.css", "css", b".ss-card"),                                # screenshot thumbnail card
     ("/learn.js", "javascript", b"renameBookmark"),                    # UI rename
     ("/learn.js", "javascript", b"deleteBookmark"),                    # UI delete
     ("/player-core.js", "javascript", b"setVolume"),                   # volume control surface

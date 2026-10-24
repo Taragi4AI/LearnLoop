@@ -185,6 +185,50 @@
 
         <div class="player-msg err" id="playerError" role="alert" aria-live="assertive"></div>
 
+        <!-- Action row: Capture moment + Study materials (below playback controls) -->
+        <div class="action-row" id="actionRow">
+          <button class="ctl small" id="captureBtn" type="button" disabled
+                  aria-label="Capture current video frame">
+            <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="16" height="12" rx="2"/><circle cx="10" cy="11" r="3"/><path d="M7 5l1-2h4l1 2"/></svg>
+            Capture moment
+          </button>
+          <button class="ctl small" id="studyBtn" type="button" disabled
+                  aria-label="Open saved study materials for this lecture"
+                  aria-controls="savedPanel" aria-expanded="false">
+            <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h8l4 4v9a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M12 4v4h4"/></svg>
+            Study materials
+          </button>
+          <span class="action-msg" id="actionMsg" aria-live="polite"></span>
+        </div>
+
+        <!-- Saved items panel: tabs for Screenshots / Bookmarks (shown on demand) -->
+        <section class="saved-panel hidden" id="savedPanel" aria-label="Saved items for this lecture">
+          <div class="saved-head">
+            <strong>Saved items for this lecture</strong>
+          </div>
+          <div class="saved-tabs" role="tablist" aria-label="Saved item types">
+            <button class="saved-tab active" id="tabScreenshots" role="tab"
+                    aria-selected="true" aria-controls="paneScreenshots" type="button">
+              <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="16" height="12" rx="2"/><circle cx="10" cy="11" r="3"/><path d="M7 5l1-2h4l1 2"/></svg>
+              Screenshots <span class="tab-count" id="ssCount">0</span>
+            </button>
+            <button class="saved-tab" id="tabBookmarks" role="tab"
+                    aria-selected="false" aria-controls="paneBookmarks" type="button">
+              <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h10a1 1 0 011 1v13l-6-3-6 3V4a1 1 0 011-1z"/></svg>
+              Bookmarks <span class="tab-count" id="bmCount">0</span>
+            </button>
+          </div>
+          <div class="saved-pane" id="paneScreenshots" role="tabpanel" aria-labelledby="tabScreenshots">
+            <div class="ss-grid" id="ssGrid">
+              <p class="saved-empty">No screenshots yet — click <strong>Capture moment</strong> to save a frame.</p>
+            </div>
+          </div>
+          <div class="saved-pane hidden" id="paneBookmarks" role="tabpanel" aria-labelledby="tabBookmarks">
+            <!-- Bookmarks list reused here (same data, different view context) -->
+            <div class="bm-list-study" id="bmListStudy" aria-live="polite"></div>
+          </div>
+        </section>
+
         <!-- Transcript directly below the video; scrolls independently -->
         <section class="transcript-panel" id="transcriptPanel">
           <div class="tp-head">

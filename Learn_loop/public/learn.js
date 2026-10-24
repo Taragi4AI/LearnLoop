@@ -1950,3 +1950,280 @@ async function reattachLecture(lec) {
 
 // Expose a tiny hook for diagnostics (not required by the app).
 window.__learnloop = { player, formatTime, seek: (t) => player.seekTo(t), highlightCurrent };
+
+// ---------------------------------------------------------------------------
+// Capture moment + Study materials
+// ---------------------------------------------------------------------------
+// Capture the CURRENT video frame from the live <video> element.
+// Draws directly from the element — no seek, no offscreen clone — so the
+// captured image is exactly what's visible right now, at full video resolution
+// (capped to 1280px wide to keep base64 payloads reasonable).
+// Returns a JPEG data URL or null with an honest reason on failure.
+function captureCurrentFrame() {
+  const v = els.video;
+  if (!v || !v.videoWidth || !v.videoHeight) return { url: null, error: 'Video is not ready.' };
+  if (v.readyState < 2) return { url: null, error: 'Video has not loaded enough frames yet.' };
+  try {
+    const MAX_W = 1280;
+    const scale = v.videoWidth > MAX_W ? MAX_W / v.videoWidth : 1;
+    const w = Math.round(v.videoWidth * scale);
+    const h = Math.round(v.videoHeight * scale);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(v, 0, 0, w, h);
+    // toDataURL throws if the canvas is tainted (cross-origin video).
+    const url = c.toDataURL('image/jpeg', 0.88);
+    if (!url || url === 'data:,') return { url: null, error: 'Canvas produced an empty image.' };
+    // Strip the data: prefix — we store only the base64 payload.
+    const base64 = url.split(',')[1];
+    if (!base64) return { url: null, error: 'Could not encode the frame as JPEG.' };
+    return { url, base64 };
+  } catch (err) {
+    // SecurityError means CORS-tainted canvas (cross-origin src).
+    const msg = (err.name === 'SecurityError')
+      ? 'Cannot capture: the video source is cross-origin. Try a local file.'
+      : 'Capture failed: ' + (err.message || err);
+    return { url: null, error: msg };
+  }
+}
+
+// Save a captured frame to the server. Confirms only after a 2xx response.
+// Returns { ok, id?, error? }.
+async function saveScreenshot(base64, timestamp, transcriptExcerpt) {
+  if (!currentVideoId) return { ok: false, error: 'No lecture loaded.' };
+  const title = `Frame at ${formatTime(timestamp)}`;
+  try {
+    const res = await fetch(`/api/lectures/${currentVideoId}/screenshots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_data: base64,
+        timestamp_seconds: timestamp,
+        title,
+        transcript_excerpt: transcriptExcerpt || null,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, error: data?.error?.message || `HTTP ${res.status}` };
+    return { ok: true, id: data.id, title: data.title };
+  } catch (err) {
+    return { ok: false, error: 'Network error: ' + err.message };
+  }
+}
+
+// Show a brief status message in the action row (auto-clears after 3s).
+let _actionMsgTimer = null;
+function showActionMsg(text, isErr = false) {
+  const el_ = $('#actionMsg');
+  if (!el_) return;
+  el_.textContent = text;
+  el_.className = 'action-msg' + (isErr ? ' err' : '');
+  if (_actionMsgTimer) clearTimeout(_actionMsgTimer);
+  _actionMsgTimer = setTimeout(() => { el_.textContent = ''; el_.className = 'action-msg'; }, 3000);
+}
+
+// Wire the Capture moment button.
+const captureBtn = $('#captureBtn');
+const studyBtn = $('#studyBtn');
+if (captureBtn) {
+  captureBtn.addEventListener('click', async () => {
+    if (captureBtn.disabled) return;
+    captureBtn.disabled = true;
+    showActionMsg('Capturing…');
+    const t = els.video.currentTime || 0;
+    const { url, base64, error } = captureCurrentFrame();
+    if (!url) {
+      showActionMsg(error || 'Capture failed.', true);
+      captureBtn.disabled = false;
+      return;
+    }
+    showActionMsg('Saving…');
+    const result = await saveScreenshot(base64, t, nearestExcerpt(t));
+    if (!result.ok) {
+      showActionMsg('Save failed: ' + result.error, true);
+    } else {
+      showActionMsg('✓ Captured at ' + formatTime(t));
+      await loadSavedPanel(false);   // refresh without opening the panel
+    }
+    captureBtn.disabled = false;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Study materials panel — tab switching + data loading
+// ---------------------------------------------------------------------------
+let _savedPanelOpen = false;
+let _activeTab = 'screenshots';
+
+if (studyBtn) {
+  studyBtn.addEventListener('click', async () => {
+    const panel = $('#savedPanel');
+    if (!panel) return;
+    if (_savedPanelOpen) {
+      panel.classList.add('hidden');
+      _savedPanelOpen = false;
+      studyBtn.setAttribute('aria-expanded', 'false');
+    } else {
+      panel.classList.remove('hidden');
+      _savedPanelOpen = true;
+      studyBtn.setAttribute('aria-expanded', 'true');
+      await loadSavedPanel(true);
+    }
+  });
+}
+
+// Tab buttons
+const tabScreenshots = $('#tabScreenshots');
+const tabBookmarks_ = $('#tabBookmarks');
+if (tabScreenshots) {
+  tabScreenshots.addEventListener('click', () => switchSavedTab('screenshots'));
+}
+if (tabBookmarks_) {
+  tabBookmarks_.addEventListener('click', () => switchSavedTab('bookmarks'));
+}
+
+function switchSavedTab(tab) {
+  _activeTab = tab;
+  const isScreenshots = tab === 'screenshots';
+  tabScreenshots?.classList.toggle('active', isScreenshots);
+  tabScreenshots?.setAttribute('aria-selected', String(isScreenshots));
+  tabBookmarks_?.classList.toggle('active', !isScreenshots);
+  tabBookmarks_?.setAttribute('aria-selected', String(!isScreenshots));
+  $('#paneScreenshots')?.classList.toggle('hidden', !isScreenshots);
+  $('#paneBookmarks')?.classList.toggle('hidden', isScreenshots);
+}
+
+// Load/refresh the saved-panel contents from the server.
+// `openIfNew` = true when called from the Study materials button (always renders);
+// false when called after a capture (only refreshes if already open).
+async function loadSavedPanel(openIfNew = false) {
+  if (!currentVideoId) return;
+  if (!openIfNew && !_savedPanelOpen) return;
+  await Promise.all([loadSavedScreenshots(), loadSavedBookmarksStudy()]);
+}
+
+async function loadSavedScreenshots() {
+  const grid = $('#ssGrid');
+  const countEl = $('#ssCount');
+  if (!grid || !currentVideoId) return;
+  try {
+    const res = await fetch(`/api/lectures/${currentVideoId}/screenshots`);
+    const data = await res.json();
+    if (!res.ok) { grid.innerHTML = '<p class="saved-empty">Could not load screenshots.</p>'; return; }
+    if (countEl) countEl.textContent = data.count || 0;
+    grid.innerHTML = '';
+    if (!data.count) {
+      grid.innerHTML = '<p class="saved-empty">No screenshots yet — click <strong>Capture moment</strong> to save a frame.</p>';
+      return;
+    }
+    for (const ss of data.screenshots) {
+      grid.append(buildScreenshotCard(ss));
+    }
+  } catch {
+    grid.innerHTML = '<p class="saved-empty err">Failed to load screenshots.</p>';
+  }
+}
+
+function buildScreenshotCard(ss) {
+  const card = el('div', { className: 'ss-card' });
+  card.dataset.id = ss.id;
+
+  // Thumbnail area — image loaded via the /image route
+  const thumb = el('button', { className: 'ss-thumb', type: 'button' });
+  const img = el('img', { alt: ss.title || formatTime(ss.timestamp_seconds) });
+  img.src = `/api/lectures/${currentVideoId}/screenshots/${ss.id}/image`;
+  img.loading = 'lazy';
+  // If image fails to load, show a camera placeholder
+  img.onerror = () => {
+    img.remove();
+    thumb.innerHTML = '<svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#666" stroke-width="1.5"><rect x="2" y="6" width="20" height="14" rx="2.5"/><circle cx="12" cy="13" r="3.5"/><path d="M9 6l1.5-2h3L15 6"/></svg>';
+  };
+  thumb.append(img);
+
+  const ts = el('span', { className: 'ss-ts', textContent: formatTime(ss.timestamp_seconds) });
+  thumb.append(ts);
+
+  // Selecting the frame opens the persisted artifact for inspection; the
+  // timestamp action below returns the learner to its source moment.
+  thumb.setAttribute('aria-label', `Inspect screenshot captured at ${formatTime(ss.timestamp_seconds)}`);
+  thumb.addEventListener('click', () => window.open(img.src, '_blank', 'noopener'));
+
+  // Footer: title + delete button
+  const footer = el('div', { className: 'ss-footer' });
+  const seek = el('button', { className: 'ss-title', type: 'button',
+    textContent: ss.title || formatTime(ss.timestamp_seconds),
+    title: `Seek lecture to ${formatTime(ss.timestamp_seconds)}` });
+  seek.addEventListener('click', () => seekPlayer(ss.timestamp_seconds));
+  footer.append(seek);
+  const del = el('button', { className: 'ss-del', type: 'button', title: 'Delete screenshot', textContent: '✕' });
+  del.setAttribute('aria-label', `Delete screenshot at ${formatTime(ss.timestamp_seconds)}`);
+  del.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm(`Delete screenshot at ${formatTime(ss.timestamp_seconds)}?`)) return;
+    try {
+      const res = await fetch(`/api/lectures/${currentVideoId}/screenshots/${ss.id}`, { method: 'DELETE' });
+      if (res.ok) { card.remove(); await loadSavedScreenshots(); }
+      else showActionMsg('Delete failed.', true);
+    } catch { showActionMsg('Delete failed.', true); }
+  });
+  footer.append(del);
+
+  card.append(thumb, footer);
+  return card;
+}
+
+async function loadSavedBookmarksStudy() {
+  const list = $('#bmListStudy');
+  const countEl = $('#bmCount');
+  if (!list || !currentVideoId) return;
+  try {
+    const res = await fetch(`/api/lectures/${currentVideoId}/bookmarks`);
+    const data = await res.json();
+    if (!res.ok) { list.innerHTML = '<p class="saved-empty">Could not load bookmarks.</p>'; return; }
+    if (countEl) countEl.textContent = data.count || 0;
+    list.innerHTML = '';
+    if (!data.count) {
+      list.innerHTML = '<p class="saved-empty">No bookmarks saved for this lecture yet.</p>';
+      return;
+    }
+    for (const b of data.bookmarks) {
+      const row = el('div', { className: 'bm-item' });
+      const open = el('button', { className: 'bm-open', type: 'button',
+        title: 'Seek to ' + formatTime(b.timestamp_seconds) });
+      open.append(el('span', { className: 'bm-time', textContent: formatTime(b.timestamp_seconds) }));
+      const txt = el('span', { className: 'bm-text' });
+      txt.append(el('strong', { textContent: b.title }));
+      if (b.transcript_excerpt) txt.append(el('span', { className: 'bm-ex', textContent: ' — ' + b.transcript_excerpt }));
+      open.append(txt);
+      open.addEventListener('click', () => seekPlayer(b.timestamp_seconds));
+      row.append(open);
+      list.append(row);
+    }
+  } catch {
+    list.innerHTML = '<p class="saved-empty">Failed to load bookmarks.</p>';
+  }
+}
+
+// Enable/disable the action-row buttons based on lecture state.
+// Called whenever a lecture loads or the player becomes ready.
+function updateActionRowState() {
+  const ready = !!currentVideoId && player.canControl();
+  if (captureBtn) captureBtn.disabled = !ready;
+  if (studyBtn) studyBtn.disabled = !currentVideoId;
+}
+
+// Hook into the existing player state-change listener to enable buttons on ready.
+player.onStateChange(() => updateActionRowState());
+// Also trigger when a lecture's video id is set (after upload/reattach).
+// This is handled by the pollStatus/reattachLecture paths which call loadBookmarks();
+// we piggyback by patching loadBookmarks to also call updateActionRowState.
+const _origLoadBookmarks = loadBookmarks;
+async function loadBookmarks(...args) {
+  await _origLoadBookmarks(...args);
+  updateActionRowState();
+  // If the study panel is open, refresh the bookmarks tab too.
+  if (_savedPanelOpen) await loadSavedBookmarksStudy();
+}
+
+// Initial state on page load.
+updateActionRowState();
