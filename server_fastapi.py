@@ -255,6 +255,42 @@ async def avatars_list():
     return _relay(*_boson_request("GET", "/avatars"))
 
 
+async def _create_boson_avatar_session(payload: dict, avatar_id: str):
+    """Retry only explicit, session-free failures from Boson.
+
+    Preset IDs are documented as available to every key. Boson can briefly
+    report one as missing despite listing it, so give that 404 one short retry.
+    Never retry an ambiguous timeout or proxy error that may have created a
+    session whose ID we did not receive.
+    """
+    presets = {"builtin_claire_v1", "builtin_emma_v1", "builtin_james_v1"}
+    for attempt in range(3):
+        result = await asyncio.to_thread(
+            _boson_request, "POST", "/avatar/sessions",
+            json_body=payload, include_headers=True,
+        )
+        status, _, raw, headers = result
+        if attempt == 2:
+            return result
+        try:
+            error = json.loads(raw.decode("utf-8")).get("error", {})
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            error = {}
+        code = error.get("code") if isinstance(error, dict) else None
+        if status == 404 and code == "avatar_not_found" and avatar_id in presets and attempt == 0:
+            await asyncio.sleep(0.5)
+            continue
+        if status == 503 and code == "service_unavailable":
+            try:
+                retry_delay = float(headers.get("Retry-After", 1))
+            except (TypeError, ValueError):
+                retry_delay = 1.0
+            await asyncio.sleep(min(max(retry_delay, 2 ** attempt), 10))
+            continue
+        return result
+    return result
+
+
 @app.post("/api/live-avatar/sessions")
 async def live_avatar_session_create(request: Request):
     if not API_KEY:
@@ -320,29 +356,9 @@ async def live_avatar_session_create(request: Request):
         "max_duration_seconds": max_duration,
     }
 
-    async def create_boson_session():
-        return await asyncio.to_thread(
-            _boson_request, "POST", "/avatar/sessions",
-            json_body=avatar_payload, include_headers=True,
-        )
-
-    # Only an explicit service_unavailable response is safe to retry. A lost
-    # response may have created a session, so never retry a timeout or 502.
-    for attempt in range(3):
-        status, content_type, raw, upstream_headers = await create_boson_session()
-        if status != 503 or attempt == 2:
-            break
-        try:
-            upstream_error = json.loads(raw.decode("utf-8")).get("error", {})
-        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
-            upstream_error = {}
-        if not isinstance(upstream_error, dict) or upstream_error.get("code") != "service_unavailable":
-            break
-        try:
-            retry_delay = float(upstream_headers.get("Retry-After", 1))
-        except (TypeError, ValueError):
-            retry_delay = 1.0
-        await asyncio.sleep(min(max(retry_delay, 2 ** attempt), 10))
+    status, content_type, raw, upstream_headers = await _create_boson_avatar_session(
+        avatar_payload, avatar_id,
+    )
     if status not in (200, 201):
         return _relay(status, content_type, raw, {
             "Retry-After": upstream_headers.get("Retry-After"),

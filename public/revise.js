@@ -353,6 +353,16 @@ async function startSession() {
       els.stop.disabled = true;
       return;
     }
+    if (error.status === 404 && error.code === 'avatar_not_found') {
+      const selectedName = els.avatarId.selectedOptions[0]?.textContent?.split(' · ')[0] || 'this avatar';
+      els.avatarSetupNote.textContent = `Boson could not start ${selectedName} right now.`;
+      setRoomState('idle');
+      setError(`Boson listed ${selectedName}, but could not start a session. Try again or choose another avatar.`);
+      els.start.textContent = 'Try avatar again';
+      els.start.disabled = false;
+      els.stop.disabled = true;
+      return;
+    }
     els.avatarSetupNote.textContent = `Audio-only this session: ${error.message}`;
   }
   addBubble('system', `${MODES[activeMode].label} · ${activeLecture.title}`);
