@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>openWakeWord browser PoC — LearnLoop G3.0 (LL-G3.0-005)</title>
+  <!--
+    ISOLATED PROOF OF CONCEPT. NOT part of the LearnLoop app. No Higgs Realtime,
+    no app backend. Microphone audio is processed LOCALLY only.
+
+    Design (LL-G3.0-005): microphone acquisition is DECOUPLED from the wake-word
+    detector. The Enable button calls getUserMedia() directly from the user
+    gesture and shows green + live waveform on success — independent of whether
+    the (heavier) ONNX detector loads. Detector status is shown SEPARATELY so a
+    moving waveform is never mistaken for a wake-word detection.
+
+    Supported PREBUILT phrase: "Hey Jarvis" (NOT "Looper"). No custom wake word.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "onnxruntime-web": "./ort/ort.min.mjs"
+    }
+  }
+  </script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; background:#0f1320; color:#e6ebff; }
+    h1 { font-size: 20px; } .sub { color:#9aa4bf; font-size:13px; margin-top:-8px; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:12px 0; }
+    button { background:#2b3350; color:#e6ebff; border:none; border-radius:8px; padding:10px 18px; cursor:pointer; font-size:14px; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    #micBtn.on { background:#1f7a46; }                    /* green only when mic truly on */
+    #micBtn.on:hover { background:#24914f; }
+    .pill { padding:4px 12px; border-radius:999px; background:rgba(139,147,167,.15); font-size:13px; }
+    .pill[data-s="active"]{ color:#7ee0a2; } .pill[data-s="error"]{ color:#ff6b6b; }
+    .pill[data-s="nosignal"]{ color:#ffd479; } .pill[data-s="off"]{ color:#9aa4bf; }
+    .label { font-size:12px; color:#9aa4bf; margin-right:6px; }
+    canvas { width:100%; height:120px; background:#141a2b; border:1px solid #2b3350; border-radius:8px; display:block; }
+    .metrics { display:flex; gap:20px; font-size:13px; color:#cbd3e6; margin:10px 0; flex-wrap:wrap; }
+    .metrics b { color:#8ec5ff; font-variant-numeric:tabular-nums; }
+    #log { background:#141a2b; border:1px solid #2b3350; border-radius:8px; padding:10px; height:200px; overflow:auto; font-family:ui-monospace,monospace; font-size:12px; margin-top:12px; }
+    .det{color:#7ee0a2} .err{color:#ff6b6b} .info{color:#9aa4bf} code{color:#ffd479}
+  </style>
+</head>
+<body>
+  <h1>openWakeWord browser PoC</h1>
+  <p class="sub">Local mic capture + live waveform. Wake-word detector for the prebuilt
+     phrase <code>"Hey Jarvis"</code> (separate status). No audio leaves the browser.</p>
+
+  <div class="row">
+    <button id="micBtn" type="button">Enable microphone</button>
+    <span class="pill" id="micState" data-s="off">Microphone off</span>
+  </div>
+
+  <div class="row">
+    <span class="label" id="waveLabel">Waveform (inactive)</span>
+  </div>
+  <canvas id="wave" width="760" height="120" aria-label="Live microphone waveform"></canvas>
+
+  <div class="metrics">
+    <span>Detector: <b id="detState">not loaded</b></span>
+    <span>Detections: <b id="mDet">0</b></span>
+    <span>Last latency: <b id="mLat">—</b></span>
+    <span>Negative-test false activations: <b id="mFalse">0</b></span>
+  </div>
+  <div class="row">
+    <button id="negstart" type="button" disabled>Start 60s negative test</button>
+    <span id="negstate" class="info"></span>
+  </div>
+
+  <div id="log" aria-live="polite"></div>
+
+  <script type="module">
+    const $ = (s) => document.querySelector(s);
+    const micBtn = $('#micBtn'), micState = $('#micState'), waveLabel = $('#waveLabel');
+    const detState = $('#detState'), mDet = $('#mDet'), mLat = $('#mLat'), mFalse = $('#mFalse');
+    const canvas = $('#wave'), ctx = canvas.getContext('2d');
+
+    // --- state ---
+    let stream = null, audioCtx = null, source = null, analyser = null, rafId = null;
+    let engine = null, detections = 0, negActive = false, negFalse = 0, lastSpeechStart = 0;
+
+    function log(msg, cls='info') {
+      const t = new Date().toISOString().substr(11, 12);
+      const d = document.createElement('div'); d.className = cls; d.textContent = `[${t}] ${msg}`;
+      $('#log').append(d); $('#log').scrollTop = $('#log').scrollHeight;
+    }
+    function setMic(s, label) { micState.dataset.s = s; micState.textContent = label; }
+
+    // --- canvas sizing (handle DPR + resize) ---
+    function sizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 760, h = 120;
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener('resize', sizeCanvas);
+
+    function drawIdle() {
+      const w = canvas.clientWidth || 760, h = 120;
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = 'rgba(139,147,167,.4)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+    }
+
+    function drawLoop() {
+      rafId = requestAnimationFrame(drawLoop);
+      const buf = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(buf);
+      const w = canvas.clientWidth || 760, h = 120;
+      ctx.clearRect(0, 0, w, h);
+      // RMS for signal/silence status
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) { const v = (buf[i]-128)/128; sum += v*v; }
+      const rms = Math.sqrt(sum / buf.length);
+      const active = rms > 0.012;
+      waveLabel.textContent = active ? 'Waveform (signal)' : 'Waveform (no audio signal detected)';
+      if (!active) setMic('nosignal', 'Microphone active — no audio signal detected');
+      else setMic('active', 'Microphone active');
+      // draw
+      ctx.lineWidth = 2; ctx.strokeStyle = active ? '#7ee0a2' : '#6ea8fe';
+      ctx.beginPath();
+      const step = w / buf.length;
+      for (let i = 0; i < buf.length; i++) {
+        const y = h/2 + ((buf[i]-128)/128) * (h/2) * 0.9;
+        i === 0 ? ctx.moveTo(0, y) : ctx.lineTo(i*step, y);
+      }
+      ctx.stroke();
+    }
+
+    // --- microphone acquisition (gesture-driven, independent of detector) ---
+    async function enableMic() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setMic('error', 'Microphone not supported in this browser');
+        log('getUserMedia unavailable (unsupported browser or insecure context).', 'err');
+        return;
+      }
+      micBtn.disabled = true;
+      setMic('off', 'requesting permission…');
+      log('requesting microphone permission…', 'info');
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        // Distinguish the permission outcomes.
+        const name = err && err.name ? err.name : 'Error';
+        let reason;
+        if (name === 'NotAllowedError' || name === 'SecurityError')
+          reason = 'Permission denied (or dismissed). Click to retry and choose "Allow".';
+        else if (name === 'NotFoundError' || name === 'DevicesNotFoundError')
+          reason = 'No microphone found on this device.';
+        else if (name === 'NotReadableError' || name === 'TrackStartError')
+          reason = 'Microphone is unavailable or already in use by another app.';
+        else reason = `Microphone error: ${name}`;
+        setMic('error', reason);
+        log('getUserMedia failed: ' + name + ' — ' + reason, 'err');
+        micBtn.disabled = false;          // allow retry
+        return;
+      }
+
+      // Success: set up AudioContext + analyser for the LOCAL waveform.
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.5;
+        source.connect(analyser);         // analyser only — NOT to destination (no echo, no upload)
+        sizeCanvas();
+        drawLoop();
+      } catch (err) {
+        log('AudioContext/analyser setup failed: ' + (err?.message || err), 'err');
+        setMic('error', 'Audio pipeline error (visualisation unavailable)');
+        // mic may still be live; fall through to allow stop
+      }
+
+      // Only NOW turn the control green + mark on.
+      micBtn.classList.add('on');
+      micBtn.textContent = 'Microphone On — click to stop';
+      micBtn.disabled = false;
+      setMic('active', 'Microphone active');
+      $('#negstart').disabled = false;
+      log('microphone acquired. Waveform live. No audio is uploaded.', 'det');
+
+      // Kick off the detector SEPARATELY (non-blocking; failure must not break mic UX).
+      initDetector();
+    }
+
+    function stopMic() {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      try { engine?.stop?.(); } catch {}
+      engine = null; detState.textContent = 'not loaded';
+      try { source?.disconnect(); } catch {}
+      try { analyser?.disconnect(); } catch {}
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      if (audioCtx) { audioCtx.close().catch(()=>{}); audioCtx = null; }
+      source = analyser = null;
+      micBtn.classList.remove('on');
+      micBtn.textContent = 'Enable microphone';
+      micBtn.disabled = false;
+      setMic('off', 'Microphone off');
+      waveLabel.textContent = 'Waveform (inactive)';
+      $('#negstart').disabled = true;
+      drawIdle();
+      log('microphone stopped — all tracks ended, nodes disconnected, context closed.', 'info');
+    }
+
+    function toggleMic() {
+      if (stream) stopMic(); else enableMic();
+    }
+
+    // --- wake-word detector (SEPARATE status; must not block mic) ---
+    async function initDetector() {
+      detState.textContent = 'loading…';
+      log('loading wake-word detector (ONNX via LOCAL onnxruntime-web)…', 'info');
+      try {
+        // Configure ORT BEFORE the engine loads: fully local wasm, single-thread
+        // (avoids the COOP/COEP cross-origin-isolation requirement of threaded wasm
+        // under the simple static server). CPU wasm EP — no WebGPU needed.
+        const ort = await import('onnxruntime-web');
+        // Do NOT set wasmPaths: ort.min.mjs auto-resolves its .mjs/.wasm sidecars
+        // relative to its own URL (./ort/). Setting wasmPaths='./ort/' caused a
+        // doubled './ort/ort/...' path and the "no available backend [wasm]" error.
+        ort.env.wasm.numThreads = 1;   // single-thread: no COOP/COEP requirement
+        log('ORT configured: local wasm (auto sidecar path), single-thread.', 'info');
+
+        // Dynamic import so a detector failure cannot kill the mic UX.
+        const mod = await import('./vendor/WakeWordEngine.js');
+        const WakeWordEngine = mod.default || mod.WakeWordEngine;
+        engine = new WakeWordEngine({
+          baseAssetUrl: './models',   // ONNX wake-word models (local)
+          // No ortWasmPath: let ORT resolve its wasm next to ort.min.mjs (./ort/).
+          keywords: ['hey_jarvis'],
+          detectionThreshold: 0.5,
+          cooldownMs: 2000,
+        });
+        engine.on('error', (e) => { log('detector error: ' + (e?.message || e), 'err'); detState.textContent = 'error'; });
+        engine.on('speech-start', () => { lastSpeechStart = performance.now(); });
+        engine.on('detect', ({ keyword, score }) => {
+          detections++; mDet.textContent = detections;
+          const lat = lastSpeechStart ? Math.round(performance.now() - lastSpeechStart) : null;
+          if (lat != null) mLat.textContent = lat + ' ms';
+          log(`DETECT "${keyword}" score=${score.toFixed(2)}${lat!=null?` latency≈${lat}ms`:''}`, 'det');
+          if (negActive) { negFalse++; mFalse.textContent = negFalse; log('  ^ FALSE activation (negative test)', 'err'); }
+        });
+        await engine.load();
+        await engine.start();               // detector may open its own capture; see report note
+        detState.textContent = 'listening for "Hey Jarvis"';
+        log('detector ready. Mic status and detector status are independent.', 'det');
+      } catch (e) {
+        detState.textContent = 'failed to load';
+        log('detector load failed (mic + waveform still work): ' + (e?.message || e), 'err');
+      }
+    }
+
+    function startNegativeTest() {
+      negActive = true; negFalse = 0; mFalse.textContent = '0';
+      $('#negstart').disabled = true;
+      $('#negstate').textContent = 'negative test running (60s) — do NOT say the phrase';
+      log('NEGATIVE TEST started (60s).', 'info');
+      setTimeout(() => {
+        negActive = false; $('#negstart').disabled = false;
+        $('#negstate').textContent = `negative test done — ${negFalse} false activation(s) in 60s`;
+        log(`NEGATIVE TEST done: ${negFalse} false activation(s).`, negFalse ? 'err' : 'det');
+      }, 60000);
+    }
+
+    micBtn.addEventListener('click', toggleMic);
+    $('#negstart').addEventListener('click', startNegativeTest);
+    window.addEventListener('beforeunload', () => { try { stopMic(); } catch {} });
+
+    sizeCanvas(); drawIdle();
+    log('PoC ready. Click "Enable microphone". Open DevTools ▸ Network to verify no audio upload.', 'info');
+  </script>
+</body>
+</html>

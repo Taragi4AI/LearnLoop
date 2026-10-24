@@ -1,0 +1,15 @@
+{
+  "name": "boson-higgs-playground",
+  "version": "1.0.0",
+  "description": "Full-stack playground that exercises every Boson AI (Higgs) API: TTS 3, custom voices, Avatar video, and Realtime voice.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}

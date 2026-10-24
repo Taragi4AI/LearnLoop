@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LearnLoop · Lecture Player</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="learn.css" />
+  <!-- Resolve onnxruntime-web to the locally-vendored build for wake-word detection. -->
+  <script type="importmap">
+  { "imports": { "onnxruntime-web": "/wakeword/ort/ort.min.mjs" } }
+  </script>
+</head>
+<body class="learn-body">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>
+        <h1>LearnLoop</h1>
+        <p class="tagline">Watch a lecture, auto-transcribe it, search and jump to any moment</p>
+      </div>
+    </div>
+    <div class="key-status" id="keyStatus" title="Server-side key status">
+      <span class="dot" id="keyDot"></span>
+      <span id="keyLabel">checking…</span>
+    </div>
+  </header>
+
+  <main class="learn-main">
+    <!-- Lecture selection (pre-lecture entry screen; hidden once a lecture opens) -->
+    <section class="lecture-picker" id="picker">
+      <div class="hero">
+        <span class="hero-eyebrow">Learning companion</span>
+        <h2 class="hero-title">Turn any lecture into a conversation</h2>
+        <p class="hero-sub">Drop in a video and LearnLoop transcribes it locally, lets you search and
+          jump to any moment, and gives you <strong>Jarvis</strong> — a voice tutor grounded in what
+          the lecturer actually said.</p>
+      </div>
+
+      <div class="drop-zone" id="dropZone" tabindex="0" role="button"
+           aria-label="Choose a lecture video or drop one here">
+        <input type="file" id="fileInput" accept="video/mp4,video/webm,.mp4,.webm" hidden />
+        <div class="drop-inner">
+          <span class="drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor"
+                 stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2.5"/>
+              <path d="M10 9.5l5 2.5-5 2.5z" fill="currentColor" stroke="none"/>
+            </svg>
+          </span>
+          <p class="drop-primary"><strong>Click to choose</strong> or drop a video here</p>
+          <p class="muted" id="supportedNote">MP4 or WebM · stays on your machine</p>
+        </div>
+      </div>
+      <div class="picker-msg" id="pickerMsg" role="status" aria-live="polite"></div>
+
+      <!-- Quick value props -->
+      <ul class="hero-feats" aria-label="What you can do">
+        <li><span class="feat-ic" aria-hidden="true">⟲</span> Auto-transcribe locally</li>
+        <li><span class="feat-ic" aria-hidden="true">⌕</span> Search &amp; jump to any moment</li>
+        <li><span class="feat-ic" aria-hidden="true">🎙</span> Ask Jarvis, grounded in the lecture</li>
+        <li><span class="feat-ic" aria-hidden="true">🔖</span> Bookmark concepts to revisit</li>
+      </ul>
+
+      <div class="recent" id="recentWrap">
+        <div class="recent-head">Recent lectures</div>
+        <div class="recent-grid" id="recentListPicker">
+          <span class="muted">No lectures yet — drop one above to start.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================= -->
+    <!-- Three-panel learning workspace (hidden until a lecture opens). -->
+    <!-- LEFT: lecture navigation · CENTER: player + transcript ·       -->
+    <!-- RIGHT: Looper tutor + bookmarks. All original element IDs are  -->
+    <!-- preserved; sections were re-parented, not renamed.             -->
+    <!-- ============================================================= -->
+    <section class="workspace hidden" id="playerWrap" data-left="open" data-right="open">
+
+      <!-- LEFT SIDEBAR — course / lecture navigation -->
+      <aside class="ws-left" id="leftRail" aria-label="Lecture navigation">
+        <div class="rail-head">
+          <strong>Lectures</strong>
+          <button class="rail-toggle" id="leftRailToggle" type="button"
+                  aria-label="Collapse lecture navigation" title="Collapse">‹</button>
+        </div>
+        <div class="rail-body">
+          <button class="ctl small ws-newlecture" id="newLectureBtn" type="button"
+                  title="Open or import another lecture">＋ Open another lecture</button>
+          <div class="recent-list" id="recentList" aria-label="Recent lectures">
+            <span class="muted">None yet.</span>
+          </div>
+          <nav class="rail-links" aria-label="Learning artifacts">
+            <a class="rail-link" id="jumpBookmarks" href="#bmPanel">🔖 Saved concepts</a>
+          </nav>
+        </div>
+      </aside>
+
+      <!-- CENTER — main learning workspace -->
+      <section class="ws-center" id="centerCol" data-size="large">
+        <div class="player-head">
+          <div class="player-title" id="lectureTitle">Lecture</div>
+          <button class="ghost" id="closeBtn" type="button">Close lecture</button>
+        </div>
+
+        <div class="video-shell" id="videoShell" data-fit="contain" data-ratio="auto">
+          <video id="video" preload="metadata" playsinline></video>
+          <div class="video-overlay" id="videoOverlay" aria-live="polite"></div>
+        </div>
+
+        <!-- Primary playback controls (Gestalt group 1) -->
+        <div class="controls" id="controls">
+          <div class="ctl-group" role="group" aria-label="Playback">
+            <button class="ctl" id="playPause" type="button" aria-label="Play">▶︎</button>
+            <button class="ctl small" id="back10" type="button" aria-label="Back 10 seconds">« 10s</button>
+            <button class="ctl small" id="fwd10" type="button" aria-label="Forward 10 seconds">10s »</button>
+          </div>
+
+          <input type="range" id="seek" class="seek" min="0" max="0" step="0.01" value="0"
+                 aria-label="Seek" disabled />
+
+          <span class="time" id="timeLabel" aria-live="off">0:00 / 0:00</span>
+
+          <!-- Speed + volume group (Gestalt group 2) -->
+          <div class="ctl-group" role="group" aria-label="Audio and speed">
+            <label class="rate">Speed
+              <select id="rate" aria-label="Playback speed">
+                <option value="0.5">0.5×</option>
+                <option value="0.75">0.75×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.25">1.25×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+              </select>
+            </label>
+            <button class="ctl small icon" id="muteBtn" type="button" aria-label="Mute" aria-pressed="false">🔊</button>
+            <input type="range" id="volume" class="volume" min="0" max="1" step="0.05" value="1"
+                   aria-label="Volume" />
+          </div>
+
+          <!-- Display settings menu + fullscreen (Progressive disclosure; group 3) -->
+          <div class="ctl-group ctl-group-right" role="group" aria-label="Display">
+            <div class="menu-wrap">
+              <button class="ctl small icon" id="settingsBtn" type="button"
+                      aria-haspopup="true" aria-expanded="false" aria-controls="playerSettings"
+                      aria-label="Player display settings" title="Display settings">⚙</button>
+              <div class="menu hidden" id="playerSettings" role="menu" aria-label="Display settings">
+                <div class="menu-section">
+                  <span class="menu-label" id="lblSize">Player size</span>
+                  <div class="seg" role="radiogroup" aria-labelledby="lblSize">
+                    <button class="seg-btn" data-size="compact" role="radio" aria-checked="false" type="button">Compact</button>
+                    <button class="seg-btn" data-size="comfortable" role="radio" aria-checked="false" type="button">Comfortable</button>
+                    <button class="seg-btn" data-size="large" role="radio" aria-checked="true" type="button">Large</button>
+                  </div>
+                </div>
+                <div class="menu-section">
+                  <span class="menu-label" id="lblFit">Display fit</span>
+                  <div class="seg" role="radiogroup" aria-labelledby="lblFit">
+                    <button class="seg-btn" data-fit="contain" role="radio" aria-checked="true" type="button"
+                            title="Show the whole video; may leave empty bars">Contain</button>
+                    <button class="seg-btn" data-fit="cover" role="radio" aria-checked="false" type="button"
+                            title="Fill the frame; may crop edges">Cover</button>
+                  </div>
+                </div>
+                <div class="menu-section">
+                  <span class="menu-label" id="lblRatio">Aspect ratio</span>
+                  <div class="seg" role="radiogroup" aria-labelledby="lblRatio">
+                    <button class="seg-btn" data-ratio="auto" role="radio" aria-checked="true" type="button"
+                            title="Keep the video's natural shape">Auto</button>
+                    <button class="seg-btn" data-ratio="16/9" role="radio" aria-checked="false" type="button"
+                            title="16:9 frame; may letterbox or crop depending on fit">16:9</button>
+                    <button class="seg-btn" data-ratio="4/3" role="radio" aria-checked="false" type="button"
+                            title="4:3 frame; may letterbox or crop depending on fit">4:3</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <button class="ctl small icon" id="fullscreenBtn" type="button"
+                    aria-label="Fullscreen" title="Fullscreen (Esc to exit)">⛶</button>
+          </div>
+
+          <span class="media-state" id="mediaState" role="status" aria-live="polite">idle</span>
+        </div>
+
+        <div class="player-msg err" id="playerError" role="alert" aria-live="assertive"></div>
+
+        <!-- Action row: Capture moment + Study materials (below playback controls) -->
+        <div class="action-row" id="actionRow">
+          <button class="ctl small" id="captureBtn" type="button" disabled
+                  aria-label="Capture current video frame">
+            <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="16" height="12" rx="2"/><circle cx="10" cy="11" r="3"/><path d="M7 5l1-2h4l1 2"/></svg>
+            Capture moment
+          </button>
+          <button class="ctl small sec" id="studyBtn" type="button" disabled
+                  aria-label="Open saved study materials for this lecture">
+            <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h8l4 4v9a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M12 4v4h4"/></svg>
+            Study materials
+          </button>
+          <span class="action-msg" id="actionMsg" aria-live="polite"></span>
+        </div>
+
+        <!-- Saved items panel: tabs for Screenshots / Bookmarks (shown on demand) -->
+        <section class="saved-panel hidden" id="savedPanel" aria-label="Saved items for this lecture">
+          <div class="saved-head">
+            <strong>Saved items for this lecture</strong>
+          </div>
+          <div class="saved-tabs" role="tablist" aria-label="Saved item types">
+            <button class="saved-tab active" id="tabScreenshots" role="tab"
+                    aria-selected="true" aria-controls="paneScreenshots" type="button">
+              <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="16" height="12" rx="2"/><circle cx="10" cy="11" r="3"/><path d="M7 5l1-2h4l1 2"/></svg>
+              Screenshots <span class="tab-count" id="ssCount">0</span>
+            </button>
+            <button class="saved-tab" id="tabBookmarks" role="tab"
+                    aria-selected="false" aria-controls="paneBookmarks" type="button">
+              <svg class="btn-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h10a1 1 0 011 1v13l-6-3-6 3V4a1 1 0 011-1z"/></svg>
+              Bookmarks <span class="tab-count" id="bmCount">0</span>
+            </button>
+          </div>
+          <div class="saved-pane" id="paneScreenshots" role="tabpanel" aria-labelledby="tabScreenshots">
+            <div class="ss-grid" id="ssGrid">
+              <p class="saved-empty">No screenshots yet — click <strong>Capture moment</strong> to save a frame.</p>
+            </div>
+          </div>
+          <div class="saved-pane hidden" id="paneBookmarks" role="tabpanel" aria-labelledby="tabBookmarks">
+            <!-- Bookmarks list reused here (same data, different view context) -->
+            <div class="bm-list-study" id="bmListStudy" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <!-- Transcript directly below the video; scrolls independently -->
+        <section class="transcript-panel" id="transcriptPanel">
+          <div class="tp-head">
+            <strong>Transcript</strong>
+            <span class="muted" id="tpStatus">Load a lecture to begin.</span>
+            <label class="follow-toggle" title="Keep the current line visible in the transcript during playback">
+              <input type="checkbox" id="followTranscript" />
+              <span>Follow transcript</span>
+            </label>
+          </div>
+
+          <div class="tp-barwrap hidden" id="tpBarWrap" aria-hidden="true">
+            <div class="tp-bar" id="tpBar" data-stage="queued"></div>
+          </div>
+
+          <div class="tp-row">
+            <input type="text" id="tpQuery" placeholder="Search a spoken phrase…" disabled />
+            <button class="ctl small" id="tpSearch" type="button" disabled>Search</button>
+          </div>
+          <div class="tp-nav" id="tpNav">
+            <button class="ctl small" id="tpPrev" type="button" disabled
+                    aria-label="Previous occurrence">‹ Prev</button>
+            <button class="ctl small" id="tpNext" type="button" disabled
+                    aria-label="Next occurrence">Next ›</button>
+            <button class="ctl small" id="tpAuto" type="button" disabled
+                    aria-label="Auto-scan occurrences">▶ Auto-scan</button>
+            <span class="tp-counter" id="tpCounter" aria-live="polite"></span>
+          </div>
+          <div class="tp-results" id="tpResults" aria-live="polite"></div>
+
+          <div class="tp-list" id="tpList" aria-live="polite"></div>
+        </section>
+      </section>
+
+      <!-- RIGHT SIDEBAR — Looper AI tutor (persistent chat + composer + bookmarks) -->
+      <aside class="ws-right" id="looperRail" aria-label="Jarvis AI tutor">
+        <div class="rail-head">
+          <strong>🎙️ Jarvis</strong>
+          <span class="pill" id="wwState" data-s="off">Wake word off</span>
+          <button class="rail-toggle" id="rightRailToggle" type="button"
+                  aria-label="Collapse Jarvis panel" title="Collapse">›</button>
+        </div>
+
+        <!-- Activation controls — ALWAYS visible at the top of the rail so both
+             ways to start Jarvis are immediately reachable, whatever the chat height. -->
+        <div class="looper-activate">
+          <div class="looper-row">
+            <button class="ctl" id="wwManual" type="button" title="Start talking to Jarvis now">🎙 Activate</button>
+            <button class="ctl small" id="wwToggle" type="button" title="Listen for the wake word &quot;Hey Jarvis&quot;">Wake word</button>
+          </div>
+          <p class="hint hint-collapsible" id="wwHint">
+            Click <strong>Activate</strong> and ask about the lecture, or turn on
+            <code>"Hey Jarvis"</code> (processed locally in your browser).
+          </p>
+          <div class="looper-meterrow">
+            <div class="ww-meter" aria-hidden="true"><div class="ww-meter-fill" id="wwMeter"></div></div>
+            <span class="ww-score" id="wwScore" title="live wake-word model score">score —</span>
+          </div>
+        </div>
+
+        <!-- Scrollable chat history (fills remaining height) -->
+        <section class="looper-panel" id="looperPanel">
+          <div class="looper-convo" id="looperConvo">
+            <div class="convo-head" id="convoHead" data-speaking="0" data-thinking="0">
+              <span class="pill" id="rtState" data-s="idle">idle</span>
+              <span class="speaking-dot" aria-hidden="true" title="Jarvis is speaking"><i></i></span>
+              <span class="thinking-dots" aria-hidden="true" title="Jarvis is thinking"><span></span><span></span><span></span></span>
+              <button class="ctl small danger" id="rtStop" type="button" title="Stop the conversation">Stop</button>
+              <button class="ctl small" id="rtExport" type="button"
+                      title="Download a timestamped JSON log of this conversation for debugging">Export</button>
+            </div>
+            <div class="convo-scroll">
+              <div class="convo-log" id="rtLog" aria-live="polite"></div>
+              <!-- Bottom sentinel: an IntersectionObserver watches this to know
+                   whether the user is following the latest message. -->
+              <div id="rtSentinel" class="convo-sentinel" aria-hidden="true"></div>
+              <button class="jump-latest hidden" id="rtJumpLatest" type="button"
+                      aria-label="Jump to latest message">↓ Jump to latest</button>
+            </div>
+          </div>
+          <!-- Voice activity cue card: one compact cue at a time, reflecting a
+               REAL state/action. Never creates chat bubbles. Rounded white card
+               with a tinted circular icon disc (per the design reference). -->
+          <div class="cue-card-strip hidden" id="cueStrip" role="status" aria-live="polite">
+            <span class="cue-disc" id="cueIcon" aria-hidden="true"></span>
+            <span class="cue-main">
+              <span class="cue-line">
+                <span class="cue-label" id="cueLabel"></span>
+                <span class="cue-wave" id="cueWave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                <span class="cue-dots" id="cueDots" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                <span class="cue-spin" id="cueSpin" aria-hidden="true"></span>
+                <span class="cue-badge hidden" id="cueBadge"></span>
+              </span>
+              <span class="cue-sub" id="cueSub"></span>
+            </span>
+            <span class="cue-extra" id="cueExtra"></span>
+          </div>
+        </section>
+
+        <!-- Bookmarks (G5 "Remember") at the bottom -->
+        <section class="bm-panel" id="bmPanel">
+          <div class="bm-head"><strong>🔖 Saved concepts</strong></div>
+          <div class="bm-row">
+            <input type="text" id="bmTitle" placeholder="Name this moment…" />
+            <button class="ctl small" id="bmSave" type="button">Save</button>
+          </div>
+          <div class="bm-msg" id="bmMsg" aria-live="polite"></div>
+          <div class="bm-list" id="bmList" aria-live="polite"></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script type="module" src="learn.js"></script>
+</body>
+</html>
