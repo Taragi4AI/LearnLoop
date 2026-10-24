@@ -4,6 +4,27 @@
 **Branch:** `feature/learnloop-g1` (repo root `E:/higgs_hackathon`; project `Learn_loop/`).
 **Git:** baseline commit `20c8e84`; ALL G1–G6 work is UNCOMMITTED on this branch. No commits/pushes/tags were ever made this project.
 
+## Publishing status (added 2026-10-23)
+- The original playground monorepo at `E:/higgs_hackathon` (`origin` =
+  `Taragi4AI/higgs_api_playground`) also received a local checkpoint commit
+  `2019834` on `feature/learnloop-g1` (local only; not pushed) — supersedes the
+  "uncommitted" note above for that repo.
+- **LearnLoop is now published as a clean standalone repository:**
+  - **Remote:** `https://github.com/Taragi4AI/LearnLoop` (private, owner `Taragi4AI`).
+  - **Local standalone working copy:** `E:/higgs_hackathon_LearnLoop/` (separate
+    from the playground monorepo; fresh independent Git history).
+  - **Branch:** `main` → tracks `learnloop/main`.
+  - **Published commit SHA:** `9519c1c7121aa0dacea450582fa2c6f1ccffeca9`
+    ("feat: LearnLoop … (standalone)"), 65 files.
+  - Built via `git archive` of the tracked `Learn_loop/` subtree, so secrets
+    (`.env`), venv, `data/` (DB + uploads + extracted audio), caches, and
+    wake-word model blobs were excluded. Secret scan clean (placeholders only).
+  - Tests on the standalone copy: **97 passed, 7 skipped** (skips need local
+    media excluded from the repo).
+  - Note: the very first push was rejected because the GitHub repo was created
+    with an auto-README (`9280aed`); per explicit approval it was overwritten
+    with `--force-with-lease`. The playground repo + its `origin` were untouched.
+
 ## Gate status
 - **G1 Playable lecture** — PASS (HITL-accepted earlier).
 - **G2 Upload/transcribe/persist/search/seek** — PASS (HITL-accepted: A & B checklists).

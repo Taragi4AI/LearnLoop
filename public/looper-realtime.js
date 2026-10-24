@@ -92,12 +92,14 @@ export const LOOPER_TOOLS = [
 
 export function createLooperSession({ onState, onUserText, onAssistantText, onReady, onToolCall,
                                       beforeAgentAudio, onAgentAudioStart, onAgentAudioEnd,
+                                      onUserPending, onAssistantInterrupted, onResponseStart,
                                       voice = 'default' } = {}) {
   let ws = null;
   let audioCtx = null, micStream = null, micNode = null, micSource = null;
   let outputGain = null, playHead = 0, scheduled = [];
   let state = 'idle';     // idle | connecting | live | speaking | error | closed
   let starting = false;
+  let activeResponseId = null;   // id of the response currently streaming (for stale-guarding)
 
   // Manual-turn client VAD state.
   let speaking = false;       // currently detecting speech
@@ -227,17 +229,31 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     switch (msg.type) {
       case 'session.created': setState('live', 'Session ready — speak now.'); break;
       case 'input_audio_buffer.speech_started':
-        stopPlayback(); agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
-        setState('live', 'Listening…'); break;      // barge-in
-      case 'input_audio_buffer.speech_stopped': setState('live', 'Thinking…'); break;
-      case 'response.created': setState('speaking', 'Looper is responding…'); agentAudioOpen = false; break;
+        // Barge-in: stop Looper audio and tell the host its current (possibly
+        // partial) assistant bubble was interrupted, not completed.
+        stopPlayback();
+        if (agentAudioOpen) onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
+        agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
+        onUserPending && onUserPending();      // user is speaking → show provisional bubble
+        setState('live', 'Listening…'); break;
+      case 'input_audio_buffer.speech_stopped':
+        onUserPending && onUserPending();      // ensure a provisional user bubble exists
+        setState('live', 'Thinking…'); break;
+      case 'response.created':
+        // Track the active response id so the host can key its bubble to THIS
+        // response and reject deltas that belong to an older/newer one.
+        activeResponseId = (msg.response && msg.response.id) || msg.response_id || activeResponseId;
+        onResponseStart && onResponseStart(activeResponseId);
+        setState('speaking', 'Looper is responding…'); agentAudioOpen = false; break;
       case 'response.output_audio.delta':
       case 'response.audio.delta':
         if (msg.delta) gateAndPlay(msg.delta);
         break;
       case 'response.output_audio_transcript.delta':
       case 'response.audio_transcript.delta':
-        if (msg.delta) onAssistantText && onAssistantText(msg.delta, false);
+        // Pass the response id so the host associates this delta with the right
+        // message and ignores stale deltas from a superseded response.
+        if (msg.delta) onAssistantText && onAssistantText(msg.delta, false, msg.response_id || activeResponseId);
         break;
       case 'conversation.item.input_audio_transcription.completed':
         if (msg.transcript) onUserText && onUserText(msg.transcript);
@@ -258,7 +274,21 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
           // response.done.
           break;
         }
-        onAssistantText && onAssistantText('', true);
+        {
+          const doneId = (msg.response && msg.response.id) || msg.response_id || activeResponseId;
+          // Optional authoritative final text from the completed response; the
+          // host reconciles it with the streamed text (no double-append).
+          let finalText = null;
+          try {
+            for (const it of output) {
+              const parts = (it && it.content) || [];
+              for (const p of parts) {
+                if (p && (p.transcript || p.text)) finalText = (finalText || '') + (p.transcript || p.text);
+              }
+            }
+          } catch {}
+          onAssistantText && onAssistantText('', true, doneId, finalText);
+        }
         awaitingAnswer = false;               // ready for the next manual turn
         agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
         setState('live', 'Listening — speak now.');

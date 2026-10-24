@@ -15,6 +15,7 @@ import { createSearchNav } from './search-nav.js';
 import { createWakeWordListener } from './wakeword.js';
 import { createLooperSession } from './looper-realtime.js';
 import { createTurnSequencer } from './turn-sequencer.js';
+import { shouldApplyResponseEvent, reconcileFinalText, autoScrollDecision } from './chat-stream.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -164,8 +165,126 @@ els.seek.addEventListener('change', () => {
   seeking = false;
 });
 
-// Keyboard: space toggles play when the player is focused-ish.
+// ---------------------------------------------------------------------------
+// Player display settings (fit / aspect ratio / size), volume+mute, fullscreen.
+// Display prefs are DISPLAY-CONTAINER only — they never touch the source video.
+// Persisted locally (non-sensitive); fullscreen is transient and NOT persisted.
+// ---------------------------------------------------------------------------
+const videoShell = $('#videoShell');
+const centerCol = $('#centerCol');
+const PREF_KEY = 'learnloop.displayPrefs.v1';
+
+function loadDisplayPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
+    return {
+      fit: ['contain', 'cover'].includes(p.fit) ? p.fit : 'contain',
+      ratio: ['auto', '16/9', '4/3'].includes(p.ratio) ? p.ratio : 'auto',
+      size: ['compact', 'comfortable', 'large'].includes(p.size) ? p.size : 'large',
+    };
+  } catch { return { fit: 'contain', ratio: 'auto', size: 'large' }; }
+}
+function saveDisplayPrefs(p) {
+  try { localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch {}
+}
+let displayPrefs = loadDisplayPrefs();
+
+function applyDisplayPrefs() {
+  // Shell data-attributes drive the CSS; source video is never distorted.
+  videoShell.dataset.fit = displayPrefs.fit;
+  videoShell.dataset.ratio = displayPrefs.ratio;
+  centerCol.dataset.size = displayPrefs.size;
+  // Reflect selection in the menu's radio buttons (state + a11y).
+  document.querySelectorAll('#playerSettings .seg-btn').forEach((btn) => {
+    const on = (btn.dataset.size === displayPrefs.size)
+            || (btn.dataset.fit === displayPrefs.fit)
+            || (btn.dataset.ratio === displayPrefs.ratio);
+    btn.setAttribute('aria-checked', on ? 'true' : 'false');
+    btn.classList.toggle('sel', on);
+  });
+}
+applyDisplayPrefs();
+
+// Segmented-control clicks update the matching pref dimension.
+document.querySelectorAll('#playerSettings .seg-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.size) displayPrefs.size = btn.dataset.size;
+    else if (btn.dataset.fit) displayPrefs.fit = btn.dataset.fit;
+    else if (btn.dataset.ratio) displayPrefs.ratio = btn.dataset.ratio;
+    saveDisplayPrefs(displayPrefs);
+    applyDisplayPrefs();
+  });
+});
+
+// Settings menu open/close (progressive disclosure). Closes on outside click + Esc.
+const settingsBtn = $('#settingsBtn');
+const settingsMenu = $('#playerSettings');
+function setSettingsOpen(open) {
+  settingsMenu.classList.toggle('hidden', !open);
+  settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+settingsBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setSettingsOpen(settingsMenu.classList.contains('hidden'));
+});
+document.addEventListener('click', (e) => {
+  if (!settingsMenu.classList.contains('hidden') && !settingsMenu.contains(e.target) && e.target !== settingsBtn) {
+    setSettingsOpen(false);
+  }
+});
+
+// Volume + mute (playback audio controls; kept separate from display settings).
+const volume = $('#volume');
+const muteBtn = $('#muteBtn');
+function reflectMute() {
+  const muted = player.isMuted() || player.getVolume() === 0;
+  muteBtn.textContent = muted ? '🔇' : '🔊';
+  muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
+  muteBtn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+}
+volume.addEventListener('input', () => {
+  player.setVolume(Number(volume.value));
+  if (Number(volume.value) > 0 && player.isMuted()) player.setMuted(false);
+  reflectMute();
+});
+muteBtn.addEventListener('click', () => {
+  const nowMuted = !player.isMuted();
+  player.setMuted(nowMuted);
+  reflectMute();
+});
+reflectMute();   // initial sync
+
+// Fullscreen on the video shell (so controls/overlay come along where supported).
+const fullscreenBtn = $('#fullscreenBtn');
+async function toggleFullscreen() {
+  try {
+    if (!document.fullscreenElement) {
+      if (videoShell.requestFullscreen) await videoShell.requestFullscreen();
+      else els.video.webkitEnterFullscreen && els.video.webkitEnterFullscreen();  // iOS fallback
+    } else {
+      await document.exitFullscreen();
+    }
+  } catch (err) {
+    els.playerError.textContent = 'Fullscreen is not available: ' + (err?.message || err);
+  }
+}
+fullscreenBtn.addEventListener('click', toggleFullscreen);
+document.addEventListener('fullscreenchange', () => {
+  const fs = !!document.fullscreenElement;
+  fullscreenBtn.setAttribute('aria-pressed', fs ? 'true' : 'false');
+  videoShell.classList.toggle('is-fullscreen', fs);
+});
+
+// Transcript-follow toggle (default OFF). Only affects whether the transcript's
+// OWN container scrolls to the active segment — never the page or focus.
+const followToggle = $('#followTranscript');
+followToggle.addEventListener('change', () => { followTranscript = followToggle.checked; });
+
+// Keyboard: Escape closes the settings menu; Space toggles play.
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !settingsMenu.classList.contains('hidden')) {
+    setSettingsOpen(false); settingsBtn.focus(); return;
+  }
   if (els.playerWrap.classList.contains('hidden')) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
@@ -236,6 +355,8 @@ const RT_LABEL = {
 };
 let rtActive = false;
 let assistantBubble = null;
+let userBubble = null;        // provisional/finalized user bubble for the current turn
+let activeResponseId = null;  // id of the response currently streaming (stale-event guard)
 
 // ---- Conversation debug log (timestamped event timeline, exportable as JSON) ----
 let convoLog = [];
@@ -430,6 +551,7 @@ async function executeTool(name, args) {
         const saved = await persistBookmark(prop);
         pendingBookmarks.delete(pid);       // consume: cannot be saved twice
         clearPendingBookmark(pid);
+        justSavedBookmarkId = saved.id;     // confirmation flash after DB confirms
         loadBookmarks();
         return { ok: true, saved: true, id: saved.id, title: saved.title, timestamp_seconds: saved.timestamp_seconds };
       } catch (err) {
@@ -564,10 +686,10 @@ function resumeLectureAfterSpeech(reason) {
 
 const looper = createLooperSession({
   beforeAgentAudio: ensureLecturePausedForSpeech,
-  onAgentAudioStart: () => logEvent('agent_audio_start'),
+  onAgentAudioStart: () => { logEvent('agent_audio_start'); setSpeakingIndicator(true); },
   // Do NOT resume between utterances: the user is still in a conversation and
   // may ask follow-ups. The lecture resumes when the whole session ends (below).
-  onAgentAudioEnd: () => logEvent('agent_audio_end'),
+  onAgentAudioEnd: () => { logEvent('agent_audio_end'); setSpeakingIndicator(false); },
   onToolCall: async (call) => {
     let args = {};
     try { args = JSON.parse(call.arguments || '{}'); } catch {}
@@ -582,8 +704,22 @@ const looper = createLooperSession({
     ww.rtState.textContent = RT_LABEL[s] || s;
     if (detail) ww.rtState.title = detail;
     logEvent('state', { state: s, detail: detail || '' });
+    // Discreet "thinking" indicator: the model is preparing a response but no
+    // audio is playing yet (state 'speaking' before onAgentAudioStart, or the
+    // "Thinking…" detail after the user's turn commits). Cleared once audio
+    // starts (speaking dot takes over) or the turn ends.
+    const thinking = (s === 'speaking') || (/thinking/i.test(detail || ''));
+    setThinkingIndicator(thinking && s !== 'closed' && s !== 'error');
     if (s === 'closed' || s === 'error') {
       rtActive = false;
+      setSpeakingIndicator(false);
+      setThinkingIndicator(false);
+      // A response still mid-stream when the session ended is interrupted, not
+      // completed — mark it honestly and keep the partial text.
+      if (assistantBubble) { assistantBubble.classList.remove('streaming'); assistantBubble.classList.add('interrupted'); assistantBubble = null; }
+      // A provisional user bubble that never got a final transcript: drop the
+      // "listening…" placeholder so we don't leave fabricated text behind.
+      if (userBubble) { userBubble.remove(); userBubble = null; }
       if (s === 'error') addConvo('system', detail || 'error');
       // Resume the lecture if it was playing when Looper took over, so the video
       // is never left stuck paused after a conversation (the reported bug).
@@ -596,8 +732,28 @@ const looper = createLooperSession({
       }, 1500);
     }
   },
+  // User finished/started speaking but the final STT transcript hasn't arrived.
+  // Show ONE provisional bubble (distinct styling, no fabricated text) and keep
+  // reusing it — never append a duplicate per event.
+  onUserPending: () => {
+    if (!userBubble) {
+      userBubble = addConvo('you', 'listening…');
+      userBubble.classList.add('provisional');
+    }
+    assistantBubble = null;   // a new user turn ends the previous assistant bubble
+  },
   onUserText: (t) => {
-    addConvo('you', t); assistantBubble = null;
+    // Finalize the user turn: replace the provisional bubble's text in place
+    // (no duplicate), or create a finalized bubble if none existed.
+    if (userBubble) {
+      userBubble.classList.remove('provisional');
+      setConvoText(userBubble, t);
+      maybeAutoScroll();
+    } else {
+      addConvo('you', t);
+    }
+    userBubble = null;
+    assistantBubble = null;
     logEvent('user_transcript', { text: t, position_s: Number((els.video.currentTime || 0).toFixed(2)) });
     // Race-free: sequencer fetches question-scoped context, injects it, THEN
     // requests the response (manual turn control). Keyed to the current lecture
@@ -605,24 +761,157 @@ const looper = createLooperSession({
     turnSeq.setLecture(currentVideoId);
     turnSeq.handleUserTurn(t, { lectureId: currentVideoId, position: els.video.currentTime || 0 });
   },
-  onAssistantText: (delta, done) => {
-    if (done) {
-      if (assistantBubble) logEvent('assistant_transcript', { text: assistantBubble._raw || '' });
-      assistantBubble = null;
+  // A new response is starting: remember its id so deltas associate with THIS
+  // message and late deltas from a superseded response are rejected. The bubble
+  // is created LAZILY on the first text delta, so a tool-only response (no
+  // spoken text) never leaves an empty bubble.
+  onResponseStart: (responseId) => {
+    activeResponseId = responseId || activeResponseId;
+    assistantBubble = null;   // next delta for this id creates+keys the bubble
+  },
+  // Looper's response was interrupted (barge-in). Keep whatever text we received
+  // and mark it clearly as interrupted rather than silently finalizing.
+  onAssistantInterrupted: (responseId) => {
+    const b = bubbleForResponse(responseId);
+    if (b) {
+      b.classList.remove('streaming');
+      b.classList.add('interrupted');
+      logEvent('assistant_interrupted', { text: b._raw || '' });
+    }
+    assistantBubble = null;
+    setSpeakingIndicator(false);
+  },
+  onAssistantText: (delta, done, responseId, finalText) => {
+    // Reject text events belonging to a superseded response (pure guard).
+    const bubbleId = assistantBubble?.dataset.responseId;
+    if (!shouldApplyResponseEvent(responseId, activeResponseId, bubbleId)) {
+      logEvent('assistant_text_stale_ignored', { responseId, activeResponseId });
       return;
     }
-    if (!assistantBubble) { assistantBubble = addConvo('looper', ''); }
-    assistantBubble.textContent = 'Looper: ' + ((assistantBubble._raw = (assistantBubble._raw || '') + delta));
+    let b = bubbleForResponse(responseId) || assistantBubble;
+    if (done) {
+      if (b) {
+        // Reconcile authoritative final text without double-appending.
+        const reconciled = reconcileFinalText(b._raw, finalText);
+        if (reconciled != null) { setConvoText(b, reconciled); maybeAutoScroll(); }
+        b.classList.remove('streaming');
+        logEvent('assistant_transcript', { text: b._raw || '' });
+      }
+      assistantBubble = null;
+      setSpeakingIndicator(false);
+      return;
+    }
+    // Delta. If no bubble exists yet (deltas can precede response.created in odd
+    // orderings), create one and key it to the response id.
+    if (!b) {
+      b = addConvo('looper', '');
+      b.dataset.responseId = responseId || activeResponseId || '';
+      b.classList.add('streaming');
+      assistantBubble = b;
+    }
+    appendConvoDelta(b, delta);
   },
 });
 
+// Find the assistant bubble that belongs to a given response id (falls back to
+// the active streaming bubble when ids are unavailable from the provider).
+function bubbleForResponse(responseId) {
+  if (responseId) {
+    const found = ww.rtLog.querySelector('.convo-row.looper[data-response-id="' + CSS.escape(responseId) + '"]');
+    if (found) return found;
+  }
+  return assistantBubble;
+}
+
+// Subtle, non-animated "Looper is speaking" indicator on the conversation head.
+function setSpeakingIndicator(on) {
+  const head = document.querySelector('#looperConvo .convo-head');
+  if (head) {
+    head.dataset.speaking = on ? '1' : '0';
+    if (on) head.dataset.thinking = '0';   // speaking supersedes thinking
+  }
+}
+// Discreet "thinking" dots while Looper prepares a response (no audio yet).
+function setThinkingIndicator(on) {
+  const head = document.querySelector('#looperConvo .convo-head');
+  if (head && head.dataset.speaking !== '1') head.dataset.thinking = on ? '1' : '0';
+}
+
+// ---- Chat auto-scroll (bottom-sentinel based) ---------------------------------
+// The scroll container is .convo-scroll (holds the log + a bottom sentinel +
+// the floating "Jump to latest" button). An IntersectionObserver on the
+// sentinel tells us whether the user is "following" the bottom. We only
+// auto-scroll while following; if the user scrolls up, we stop and reveal the
+// Jump-to-latest button. This replaces unconditional scrollIntoView() and
+// stays entirely within the chat panel (never the page).
+const convoScroll = document.querySelector('#looperConvo .convo-scroll');
+const jumpLatestBtn = $('#rtJumpLatest');
+let followingBottom = true;     // is the user pinned to the latest message?
+
+function convoNearBottom() {
+  const n = convoScroll;
+  if (!n) return true;
+  return (n.scrollHeight - n.scrollTop - n.clientHeight) < 48;
+}
+function convoScrollToBottom() {
+  if (!convoScroll) return;
+  convoScroll.scrollTop = convoScroll.scrollHeight;
+  followingBottom = true;
+  jumpLatestBtn?.classList.add('hidden');
+}
+
+// Observe the sentinel: visible ⇒ user is at the bottom (following).
+if (convoScroll && jumpLatestBtn) {
+  const sentinel = $('#rtSentinel');
+  if (sentinel && 'IntersectionObserver' in window) {
+    new IntersectionObserver((entries) => {
+      followingBottom = entries[0].isIntersecting;
+      if (followingBottom) jumpLatestBtn.classList.add('hidden');
+    }, { root: convoScroll, threshold: 0.1 }).observe(sentinel);
+  }
+  // Manual scroll up ⇒ stop following (observer also updates this).
+  convoScroll.addEventListener('scroll', () => {
+    if (!convoNearBottom()) followingBottom = false;
+  }, { passive: true });
+  jumpLatestBtn.addEventListener('click', () => convoScrollToBottom());
+}
+
+// Reveal the jump button when new content arrives while the user is reading up.
+function maybeAutoScroll() {
+  const d = autoScrollDecision(followingBottom);
+  if (d.scroll) convoScrollToBottom();
+  if (d.showJump) jumpLatestBtn?.classList.remove('hidden');
+}
+
+// Build a chat bubble with a role label + a dedicated content node. The content
+// node is updated in place during streaming (no full-row rebuild). `_raw` holds
+// the accumulated text so deltas append cleanly and whitespace is preserved
+// (CSS white-space: pre-wrap renders punctuation/line breaks faithfully).
+const WHO_LABEL = { you: 'You', looper: 'Looper', system: '' };
 function addConvo(role, text) {
   const row = el('div', { className: 'convo-row ' + role });
-  row.textContent = (role === 'you' ? 'You: ' : role === 'looper' ? 'Looper: ' : '') + text;
-  row._raw = role === 'looper' ? text : undefined;
+  const label = WHO_LABEL[role];
+  if (label) row.append(el('span', { className: 'who', textContent: label + ': ' }));
+  const content = el('span', { className: 'content', textContent: text || '' });
+  row.append(content);
+  row._content = content;
+  row._raw = text || '';
   ww.rtLog.append(row);
-  ww.rtLog.scrollTop = ww.rtLog.scrollHeight;
+  maybeAutoScroll();   // follow bottom if the user is there; else reveal Jump-to-latest
   return row;
+}
+
+// Set/append bubble text via the content node only (incremental, no rebuild).
+function setConvoText(row, fullText) {
+  if (!row) return;
+  row._raw = fullText;
+  row._content.textContent = fullText;
+}
+function appendConvoDelta(row, delta) {
+  if (!row || !delta) return;
+  row._raw = (row._raw || '') + delta;
+  row._content.textContent = row._raw;
+  maybeAutoScroll();   // keep the streaming message visible if following the bottom
 }
 
 function startConversation() {
@@ -630,6 +919,11 @@ function startConversation() {
   rtActive = true;
   ww.rtLog.innerHTML = '';
   assistantBubble = null;
+  userBubble = null;
+  activeResponseId = null;
+  followingBottom = true;            // start pinned to the latest
+  jumpLatestBtn?.classList.add('hidden');
+  setSpeakingIndicator(false);
   resetConvoLog();                   // begin a fresh timestamped debug timeline
   ww.convo.classList.remove('hidden');
   looper.start();
@@ -648,9 +942,9 @@ const wakeword = createWakeWordListener({
     ww.state.dataset.s = s;
     ww.state.textContent = WW_LABEL[s] || s;
     if (detail) ww.hint.textContent = detail;
-    ww.toggle.textContent = (s === 'off' || s === 'error') ? 'Enable wake word' : 'Disable wake word';
+    ww.toggle.textContent = (s === 'off' || s === 'error') ? 'Wake word' : 'Wake word: on';
     wwOn = !(s === 'off' || s === 'error');
-    if (s !== 'activated') ww.activated.classList.add('hidden');
+    if (s !== 'activated') ww.activated?.classList.add('hidden');   // banner removed in the rail layout → null-safe
   },
   onLevel: (rms) => { ww.meter.style.width = Math.min(100, Math.round(rms * 400)) + '%'; },
   onScore: (s) => {
@@ -662,12 +956,12 @@ const wakeword = createWakeWordListener({
   onDetect: () => {
     // G3.2: on activation, pause the lecture, release the wake-word mic, and
     // hand the single microphone to a Higgs Realtime conversation.
-    ww.activated.classList.remove('hidden');
+    ww.activated?.classList.remove('hidden');   // null-safe: banner removed in rail layout
     captureResumeIntent();   // remember to resume the lecture when the session ends
     player.pause();   // explicit, idempotent — pauses the real video before the conversation
     // Release the detector's mic BEFORE opening the Realtime mic (one capture at a time).
     wakeword.disable().finally(() => {
-      ww.activated.classList.add('hidden');
+      ww.activated?.classList.add('hidden');
       startConversation();
     });
   },
@@ -723,11 +1017,17 @@ async function saveBookmark() {
     bm.title.value = '';
     bm.msg.textContent = `Saved "${data.title}" at ${formatTime(data.timestamp_seconds)}.`;
     bm.msg.className = 'bm-msg ok';           // success only AFTER the DB confirms
+    justSavedBookmarkId = data.id;            // flag for the confirmation flash on render
     loadBookmarks();
   } catch (err) {
     bm.msg.textContent = 'Save failed: ' + err.message; bm.msg.className = 'bm-msg err';
   } finally { bm.save.disabled = false; }
 }
+
+// Id of a bookmark saved in the last confirmed write → gets a one-time, brief
+// confirmation flash when the list re-renders. Confirmation is NEVER shown
+// before the backend 2xx (the flag is only set after a successful response).
+let justSavedBookmarkId = null;
 
 async function loadBookmarks() {
   bm.list.innerHTML = '';
@@ -739,6 +1039,7 @@ async function loadBookmarks() {
     if (!data.count) { bm.list.append(el('div', { className: 'muted', textContent: 'No saved concepts yet.' })); return; }
     for (const b of data.bookmarks) {
       const row = el('div', { className: 'bm-item', id: 'bm-' + b.id });
+      if (b.id === justSavedBookmarkId) { row.classList.add('just-saved'); justSavedBookmarkId = null; }
       const open = el('button', { className: 'bm-open', type: 'button',
         title: 'Reopen at ' + formatTime(b.timestamp_seconds) });
       open.append(el('span', { className: 'bm-time', textContent: formatTime(b.timestamp_seconds) }));
@@ -817,7 +1118,9 @@ function renderPendingBookmark(pid) {
     if (!p) return;
     try {
       const saved = await persistBookmark(p);
-      pendingBookmarks.delete(pid); clearPendingBookmark(pid); loadBookmarks();
+      pendingBookmarks.delete(pid); clearPendingBookmark(pid);
+      justSavedBookmarkId = saved.id;      // confirmation flash after DB confirms
+      loadBookmarks();
       logEvent('bookmark_saved_manual', { id: saved.id, title: saved.title });
     } catch (err) { bm.msg.textContent = 'Save failed: ' + err.message; bm.msg.className = 'bm-msg err'; }
   });
@@ -830,6 +1133,26 @@ function clearPendingBookmark(pid) {
   const row = document.querySelector('#prop-' + pid);
   if (row) row.remove();
 }
+
+// ---------------------------------------------------------------------------
+// Workspace layout controls (Phase 2): collapsible left/right rails + a button
+// to return to the picker. Pure UI state via data-attributes on #playerWrap;
+// no effect on playback, transcript, Looper, or bookmark logic.
+// ---------------------------------------------------------------------------
+const workspace = $('#playerWrap');
+function toggleRail(side) {
+  const attr = side === 'left' ? 'data-left' : 'data-right';
+  const open = workspace.getAttribute(attr) !== 'closed';
+  workspace.setAttribute(attr, open ? 'closed' : 'open');
+}
+$('#leftRailToggle')?.addEventListener('click', () => toggleRail('left'));
+$('#rightRailToggle')?.addEventListener('click', () => toggleRail('right'));
+// "Open another lecture" → reveal the picker again without closing the current
+// lecture's media (closeLecture fully tears down; this is a lighter path).
+$('#newLectureBtn')?.addEventListener('click', () => {
+  els.picker.classList.remove('hidden');
+  els.picker.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
 
 // ---- Boot ----
 checkHealth();
@@ -1049,6 +1372,27 @@ els.video.addEventListener('canplay', () => {
   }
 });
 
+// Scroll ONLY within a scrollable container to reveal a child — never the page.
+// This replaces element.scrollIntoView(), which climbs to the nearest scrollable
+// ancestor (often the window) and was yanking the video out of view on every
+// timeupdate. Honors reduced-motion.
+function revealInContainer(container, child) {
+  if (!container || !child) return;
+  const cRect = container.getBoundingClientRect();
+  const kRect = child.getBoundingClientRect();
+  const smooth = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (kRect.top < cRect.top) {
+    container.scrollBy({ top: kRect.top - cRect.top - 8, behavior: smooth ? 'smooth' : 'auto' });
+  } else if (kRect.bottom > cRect.bottom) {
+    container.scrollBy({ top: kRect.bottom - cRect.bottom + 8, behavior: smooth ? 'smooth' : 'auto' });
+  }
+}
+
+// Transcript-follow mode: OFF by default (passive playback must NOT move the
+// page or the transcript). When ON, only the transcript's own container scrolls
+// to keep the active segment visible — never the page, never focus.
+let followTranscript = false;
+
 function highlightCurrent(time) {
   const rows = tp.list.children;
   let activeRow = null;
@@ -1058,7 +1402,9 @@ function highlightCurrent(time) {
     row.classList.toggle('active', isActive);
     if (isActive) activeRow = row;
   }
-  if (activeRow) activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  // Passive playback: highlight only. Scroll the transcript container ONLY when
+  // the learner opted into follow mode — and only that container, not the page.
+  if (activeRow && followTranscript) revealInContainer(tp.list, activeRow);
 }
 
 function resetTranscriptUI() {
@@ -1108,8 +1454,9 @@ function renderCounterAndHighlight() {
     if (i === active) row.setAttribute('aria-current', 'true');
     else row.removeAttribute('aria-current');
   });
+  // Explicit navigation: reveal the selection inside the results container only.
   const row = resultRows[active];
-  if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  if (row) revealInContainer(tp.results, row);
 }
 
 /** Reflect current nav selection to the UI + seek the player. */
@@ -1198,24 +1545,32 @@ els.video.addEventListener('timeupdate', () => highlightCurrent(els.video.curren
 // Reattaching restores the stored video + transcript WITHOUT creating a job.
 // ---------------------------------------------------------------------------
 async function loadRecentLectures() {
-  const wrap = document.querySelector('#recentList');
-  if (!wrap) return;
+  // Two lists share the same data: the pre-lecture picker list and the
+  // workspace left-rail switcher. Populate whichever exist.
+  const wraps = ['#recentList', '#recentListPicker']
+    .map((sel) => document.querySelector(sel)).filter(Boolean);
+  if (!wraps.length) return;
   try {
     const res = await fetch('/api/lectures?limit=15');
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error?.message || `${res.status}`);
-    wrap.innerHTML = '';
-    if (!data.count) { wrap.append(el('span', { className: 'muted', textContent: 'None yet.' })); return; }
-    for (const lec of data.lectures) {
-      const row = el('button', { className: 'recent-item', type: 'button' });
-      row.append(el('span', { className: 'recent-title', textContent: lec.title }));
-      row.append(el('span', { className: 'recent-stage', textContent: lec.stage }));
-      row.addEventListener('click', () => reattachLecture(lec));
-      wrap.append(row);
+    for (const wrap of wraps) {
+      wrap.innerHTML = '';
+      if (!data.count) { wrap.append(el('span', { className: 'muted', textContent: 'None yet.' })); continue; }
+      for (const lec of data.lectures) {
+        const row = el('button', { className: 'recent-item', type: 'button' });
+        if (lec.id === currentVideoId) row.classList.add('active');   // mark the active lecture
+        row.append(el('span', { className: 'recent-title', textContent: lec.title }));
+        row.append(el('span', { className: 'recent-stage', textContent: lec.stage }));
+        row.addEventListener('click', () => reattachLecture(lec));
+        wrap.append(row);
+      }
     }
   } catch (err) {
-    wrap.innerHTML = '';
-    wrap.append(el('span', { className: 'err', textContent: 'Could not load recents: ' + err.message }));
+    for (const wrap of wraps) {
+      wrap.innerHTML = '';
+      wrap.append(el('span', { className: 'err', textContent: 'Could not load recents: ' + err.message }));
+    }
   }
 }
 
@@ -1236,6 +1591,7 @@ async function reattachLecture(lec) {
   els.video.load();
 
   currentVideoId = lec.id;
+  loadRecentLectures();   // refresh rail so the newly-active lecture is highlighted
   if (lec.stage === 'failed') {
     tpSetStatus('This lecture failed: ' + (lec.error || 'unknown error'), true);
     await refreshTranscript();            // show any partial segments honestly
