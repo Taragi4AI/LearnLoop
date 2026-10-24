@@ -24,6 +24,7 @@
       <span class="dot" id="keyDot"></span>
       <span id="keyLabel">checking…</span>
     </div>
+    <a class="ghost" href="revise.html" style="text-decoration:none;padding:9px 12px;margin-left:12px">Study with Looper ↗</a>
   </header>
 
   <main class="learn-main">
@@ -52,6 +53,14 @@
           <p class="muted" id="supportedNote">MP4 or WebM · stays on your machine</p>
         </div>
       </div>
+      <form class="url-import" id="urlImportForm">
+        <label for="lectureUrl">Or add a direct video link</label>
+        <div class="url-import-row">
+          <input id="lectureUrl" type="url" inputmode="url" placeholder="https://example.com/lecture.mp4" autocomplete="url" required />
+          <button class="ctl" type="submit" id="urlImportButton">Add video link</button>
+        </div>
+        <p class="muted">Public MP4/WebM links and single YouTube videos are supported. Playlists aren’t supported.</p>
+      </form>
       <div class="picker-msg" id="pickerMsg" role="status" aria-live="polite"></div>
 
       <!-- Quick value props -->

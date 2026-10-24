@@ -24,6 +24,9 @@ const els = {
   dropZone: $('#dropZone'),
   fileInput: $('#fileInput'),
   pickerMsg: $('#pickerMsg'),
+  urlImportForm: $('#urlImportForm'),
+  lectureUrl: $('#lectureUrl'),
+  urlImportButton: $('#urlImportButton'),
   playerWrap: $('#playerWrap'),
   lectureTitle: $('#lectureTitle'),
   closeBtn: $('#closeBtn'),
@@ -139,6 +142,39 @@ els.dropZone.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); els.fileInput.click(); }
 });
 els.fileInput.addEventListener('change', (e) => handleFile(e.target.files?.[0]));
+
+els.urlImportForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const url = els.lectureUrl.value.trim();
+  if (!url) return;
+  els.urlImportButton.disabled = true;
+  pickerInfo('Downloading the video from its link…');
+  try {
+    const res = await fetch('/api/lectures/import-url', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.id) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+    currentVideoId = data.id;
+    resetTranscriptUI();
+    els.lectureTitle.textContent = data.title || decodeURIComponent(new URL(url).pathname.split('/').pop() || 'Linked lecture');
+    els.playerError.textContent = '';
+    els.picker.classList.add('hidden');
+    els.playerWrap.classList.remove('hidden');
+    player.markLoading();
+    els.video.src = `/api/lectures/${encodeURIComponent(data.id)}/media`;
+    els.video.load();
+    tpSetStatus(data.dedup ? 'Reusing the existing lecture and transcript…' : 'Video saved. Starting transcription…');
+    startPolling();
+    loadRecentLectures();
+    els.lectureUrl.value = '';
+  } catch (err) {
+    pickerError('Link import failed: ' + err.message);
+  } finally {
+    els.urlImportButton.disabled = false;
+  }
+});
 
 els.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); els.dropZone.classList.add('drag'); });
 els.dropZone.addEventListener('dragleave', () => els.dropZone.classList.remove('drag'));

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Study Studio · LearnLoop</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="revise.css" />
+</head>
+<body class="studio-body">
+  <header class="studio-topbar">
+    <a class="studio-brand" href="learn.html" aria-label="Back to LearnLoop">
+      <span class="studio-mark">◈</span><span>LearnLoop</span>
+    </a>
+    <div class="studio-breadcrumb">Study Studio <span>·</span> Learn, practise, remember</div>
+    <div class="studio-top-actions">
+      <button class="side-toggle" type="button" data-panel-toggle="knowledge" aria-expanded="true">Sources</button>
+      <button class="side-toggle" type="button" data-panel-toggle="progress" aria-expanded="true">Progress</button>
+      <a class="back-link" href="learn.html">← Lecture library</a>
+    </div>
+  </header>
+
+  <main class="studio-layout">
+    <aside class="knowledge-panel panel-shell">
+      <div class="side-heading"><div class="section-eyebrow">YOUR KNOWLEDGE BASE</div><button class="side-close" type="button" data-panel-close="knowledge" aria-label="Collapse sources panel">×</button></div>
+      <h1>Study from what you learned</h1>
+      <p class="subtle">Choose a lecture. Your transcript and saved moments become the source for practice.</p>
+
+      <label class="field-label" for="sourceSelect">Learning material</label>
+      <select id="sourceSelect" aria-label="Choose a lecture"></select>
+      <div class="source-state" id="sourceState" role="status">Loading your lecture library…</div>
+
+      <div class="material-summary" id="materialSummary">
+        <div class="empty-source">Pick a processed lecture to see its transcript and saved moments here.</div>
+      </div>
+
+      <div class="knowledge-tabs" role="tablist" aria-label="Knowledge base sections">
+        <button class="knowledge-tab active" data-panel="transcript" role="tab" aria-selected="true">Transcript</button>
+        <button class="knowledge-tab" data-panel="saved" role="tab" aria-selected="false">Saved moments</button>
+        <button class="knowledge-expand" id="toggleKnowledgeText" type="button" aria-expanded="false">Show passages</button>
+      </div>
+      <div class="knowledge-content hidden" id="knowledgeContent" aria-live="polite">
+        <p class="empty-source">Select a lecture to browse its source material.</p>
+      </div>
+
+      <a class="upload-link" href="learn.html">＋ Add a lecture or open the player</a>
+      <div class="resize-handle resize-right" data-resize-panel="left" role="separator" aria-label="Resize sources panel" title="Drag to resize"></div>
+    </aside>
+
+    <section class="practice-column">
+      <div class="practice-heading">
+        <div>
+          <div class="section-eyebrow">LIVE REVISION</div>
+          <h2>Choose how you want to practise</h2>
+        </div>
+        <span class="source-chip" id="activeSourceChip">No source selected</span>
+      </div>
+
+      <div class="mode-grid" role="group" aria-label="Practice mode">
+        <button class="mode-card selected" data-mode="viva" type="button">
+          <span class="mode-icon">✦</span><span class="mode-name">Adaptive viva</span>
+          <span class="mode-desc">A teacher asks one question at a time and follows your understanding.</span>
+        </button>
+        <button class="mode-card" data-mode="buddy" type="button">
+          <span class="mode-icon">☷</span><span class="mode-name">Study buddy</span>
+          <span class="mode-desc">Discuss the topic freely, ask for examples, or clear up confusion.</span>
+        </button>
+        <button class="mode-card" data-mode="mcq" type="button">
+          <span class="mode-icon">◷</span><span class="mode-name">Timed MCQ</span>
+          <span class="mode-desc">Quick multiple-choice rounds with a short review after each answer.</span>
+        </button>
+      </div>
+
+      <div class="live-room panel-shell">
+        <div class="room-topline">
+          <div><span class="live-dot" id="liveDot"></span><span id="roomStatus">Ready when you are</span></div>
+          <div class="room-actions">
+            <span class="timer-chip hidden" id="timerChip">03:00</span>
+            <button class="quiet-button hidden" id="stopReply" type="button" disabled>Stop reply</button>
+            <button class="quiet-button" id="stopSession" type="button" disabled>End session</button>
+          </div>
+        </div>
+        <div class="avatar-tools">
+          <label for="avatarIdSelect">Live Higgs avatar
+            <select id="avatarIdSelect" aria-label="Choose a Higgs Avatar">
+              <option value="builtin_emma_v1">Emma · Boson preset</option>
+            </select>
+          </label>
+          <span id="avatarSetupNote">Checking live avatar availability…</span>
+        </div>
+
+        <div class="room-stage">
+          <div class="avatar-wrap" id="avatarWrap" data-state="idle" aria-label="Looper study companion">
+            <div class="avatar-glow"></div>
+            <div class="avatar-photo-wrap" id="avatarPhotoWrap">
+              <div class="avatar-waiting">Your Higgs avatar appears here when you start a conversation.</div>
+              <video class="avatar-live-video hidden" id="avatarVideo" autoplay playsinline aria-label="Live Higgs Avatar video"></video>
+            </div>
+          </div>
+
+          <div class="conversation" id="conversation" aria-live="polite">
+            <div class="welcome-note" id="welcomeNote">
+              <span class="note-spark">✦</span>
+              <p>Pick a lecture and a practice style. I’ll use your material to guide the session.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer-row">
+          <button class="primary-button" id="startSession" type="button" disabled>Start speaking with Looper</button>
+          <span class="mic-note">Your microphone starts only after you begin a session.</span>
+        </div>
+        <div class="room-error" id="roomError" role="alert"></div>
+      </div>
+
+      <section class="pack-preview panel-shell">
+        <div class="pack-head">
+          <div><div class="section-eyebrow">STUDY PACKAGE</div><h3>Everything you need to revise</h3></div>
+          <div class="pack-actions"><button class="quiet-button" id="buildPack" type="button" disabled>Build study pack</button><button class="quiet-button" id="exportPack" type="button" disabled>Export ZIP</button></div>
+        </div>
+        <div class="pack-tiles">
+          <div class="pack-tile"><span>01</span><strong>Summary & notes</strong><small>Clear, source-grounded explanations</small></div>
+          <div class="pack-tile"><span>02</span><strong>Flashcards</strong><small>Recall the ideas that matter</small></div>
+          <div class="pack-tile"><span>03</span><strong>Weak spots</strong><small>Find gaps and get a repair plan</small></div>
+          <div class="pack-tile"><span>04</span><strong>Quizzes & viva</strong><small>Adaptive practice, then review</small></div>
+        </div>
+        <p class="pack-footnote" id="packStatus">Build sends the selected transcript and saved-moment notes to Higgs Realtime. The microphone stays off. A ZIP is created only when you choose Export.</p>
+        <div class="pack-output hidden" id="packOutput" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <aside class="progress-panel panel-shell">
+      <div class="side-heading"><div class="section-eyebrow">YOUR SESSION</div><button class="side-close" type="button" data-panel-close="progress" aria-label="Collapse progress panel">×</button></div>
+      <h2>Progress</h2>
+      <div class="progress-ring" id="progressRing" style="--progress: 0%"><div><strong id="turnCount">0</strong><span>turns</span></div></div>
+      <p class="progress-copy" id="progressCopy">Your practice activity will appear here as you go.</p>
+
+      <div class="progress-stats">
+        <div><span>Mode</span><strong id="modeValue">Adaptive viva</strong></div>
+        <div><span>Time</span><strong id="elapsedValue">—</strong></div>
+        <div><span>Source</span><strong id="progressSource">No lecture yet</strong></div>
+      </div>
+
+      <div class="focus-card">
+        <div class="focus-icon">◎</div>
+        <div><strong>Progress that means something</strong><p>We’ll track answers and confidence from your practice, then use that evidence to suggest what to revisit.</p></div>
+      </div>
+      <div class="honesty-note"><span>✦</span> No made-up scores. Your progress grows from real answers and saved study work.</div>
+      <div class="resize-handle resize-left" data-resize-panel="right" role="separator" aria-label="Resize progress panel" title="Drag to resize"></div>
+    </aside>
+  </main>
+
+  <script src="/vendor/livekit-client.umd.min.js"></script>
+  <script type="module" src="revise.js"></script>
+</body>
+</html>

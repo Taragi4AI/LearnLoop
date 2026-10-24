@@ -255,6 +255,13 @@
 .drop-primary { margin: 2px 0; font-size: 16px; color: var(--text); }
 .drop-primary strong { color: var(--accent); }
 .drop-inner p.muted { margin: 4px 0 0; font-size: 13px; }
+.url-import { max-width: 680px; margin: 16px auto 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.url-import label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+.url-import-row { display: flex; gap: 8px; }
+.url-import-row input { flex: 1; min-width: 0; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font: inherit; }
+.url-import-row input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.url-import .muted { margin: 8px 0 0; font-size: 12px; }
+@media (max-width: 560px) { .url-import-row { flex-direction: column; } }
 
 .picker-msg { margin: 12px auto 0; max-width: 680px; text-align: center; min-height: 1.2em; }
 .picker-msg.err { color: var(--bad); }

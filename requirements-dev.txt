@@ -12,11 +12,15 @@ pytest==9.1.1
 
 # G2.1 — audio extraction (self-contained ffmpeg binary, venv-confined)
 imageio-ffmpeg==0.6.0
+yt-dlp[default]==2026.10.21
 
 # G2.2 — local offline transcription (faster-whisper / CTranslate2, CPU int8)
 faster-whisper==1.2.1
 ctranslate2==4.8.3
-numpy==2.5.4
+numpy==2.4.6
 
 # VG-1 verification harness (Realtime WS client; also used by future live assistant)
 websockets==17.3
+
+# Higgs Avatar realtime video (LiveKit audio-stream protocol)
+livekit-agents==1.8.8

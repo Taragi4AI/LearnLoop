@@ -1,9 +1,6 @@
 """LearnLoop backend - FastAPI migration of the Boson (Higgs) proxy.
 
-Milestone 0 scope: reproduce EXACTLY the behavior of the existing `server.py`
-proxy, verified by the characterization suite in `tests/`. No new product
-features (no uploads, transcription, wake word, Realtime refactor, bookmarks,
-or AI tools) are added here yet.
+FastAPI backend for the Boson (Higgs) proxy and LearnLoop lecture workflows.
 
 Contract preserved from server.py:
   - Routes: /api/health, /api/tts/speech, /api/voices (CRUD),
@@ -15,6 +12,8 @@ Contract preserved from server.py:
   - Video content is streamed through as binary.
   - Upstream errors are relayed with their original status and body.
   - Static files in public/ are served, with "/" -> index.html.
+  - Lecture imports accept local MP4/WebM uploads, direct public media URLs,
+    and single YouTube videos; lecture media remains on the local machine.
 
 Run:
     # PowerShell
@@ -27,11 +26,15 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
+import ipaddress
+import socket
+import urllib.parse
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-from fastapi import FastAPI, Request, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, Request, UploadFile, File, Form, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -64,11 +67,15 @@ def _auth_headers(extra: dict | None = None) -> dict:
     return headers
 
 
-def _boson_request(method: str, path: str, *, json_body=None):
+def _boson_request(method: str, path: str, *, json_body=None, include_headers=False):
     """Call the Boson API. Returns (status, content_type, body_bytes).
 
     Mirrors server.py.boson_request, including its error handling.
     """
+    def result(status, content_type, body, response_headers=None):
+        values = (status, content_type, body)
+        return (*values, response_headers or {}) if include_headers else values
+
     url = f"{API_BASE}{path}"
     data = None
     headers = _auth_headers()
@@ -78,12 +85,12 @@ def _boson_request(method: str, path: str, *, json_body=None):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req) as resp:
-            return resp.status, resp.headers.get("Content-Type", ""), resp.read()
+            return result(resp.status, resp.headers.get("Content-Type", ""), resp.read(), resp.headers)
     except urllib.error.HTTPError as e:
-        return e.code, e.headers.get("Content-Type", "application/json"), e.read()
+        return result(e.code, e.headers.get("Content-Type", "application/json"), e.read(), e.headers)
     except urllib.error.URLError as e:
         body = json.dumps({"error": {"message": str(e), "type": "proxy_error"}}).encode()
-        return 502, "application/json", body
+        return result(502, "application/json", body)
 
 
 def _config_error() -> JSONResponse:
@@ -96,23 +103,25 @@ def _config_error() -> JSONResponse:
     )
 
 
-def _relay(status: int, content_type: str, body: bytes) -> Response:
+def _relay(status: int, content_type: str, body: bytes, extra_headers: dict | None = None) -> Response:
     """Relay an upstream response, preserving status, content type, and bytes.
 
     If the body is JSON, return it as JSON; otherwise pass the raw bytes
     through with the upstream content type (audio, video, etc.).
     """
     ctype = content_type or "application/json"
+    headers = {k: v for k, v in (extra_headers or {}).items() if v is not None}
     if "application/json" in ctype:
         # Re-emit as JSON so clients always get application/json for JSON bodies.
         try:
-            return JSONResponse(status_code=status, content=json.loads(body or b"{}"))
+            return JSONResponse(status_code=status, content=json.loads(body or b"{}"), headers=headers)
         except json.JSONDecodeError:
-            return Response(content=body, status_code=status, media_type=ctype)
-    return Response(content=body, status_code=status, media_type=ctype)
+            return Response(content=body, status_code=status, media_type=ctype, headers=headers)
+    return Response(content=body, status_code=status, media_type=ctype, headers=headers)
 
 
 app = FastAPI(title="LearnLoop backend (Boson proxy)")
+LIVE_AVATAR_SESSIONS: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +177,248 @@ async def voices_delete(voice_id: str):
     if not API_KEY:
         return _config_error()
     return _relay(*_boson_request("DELETE", f"/audio/voices/{voice_id}"))
+
+
+# ---------------------------------------------------------------------------
+# Higgs Avatar Realtime - lip-synced LiveKit sessions
+# ---------------------------------------------------------------------------
+async def _livekit_credentials_error(url: str, key: str, secret: str) -> str | None:
+    """Check that the configured key can access the configured Cloud project."""
+    if secret and set(secret) <= {"•", "*", "●", "·"}:
+        return "LIVEKIT_API_SECRET contains a masked placeholder. Copy the actual secret from LiveKit Cloud into .env."
+    try:
+        from livekit import api
+    except ImportError:
+        return "LiveKit support is not installed. Install requirements-dev.txt."
+    client = None
+    try:
+        client = api.LiveKitAPI(url, key, secret)
+        await asyncio.wait_for(client.room.list_rooms(api.ListRoomsRequest()), timeout=8)
+        return None
+    except Exception as exc:
+        if getattr(exc, "status", None) == 401:
+            return "LiveKit rejected this project's API key or secret (401). Copy the URL, key, and secret from the same LiveKit Cloud project."
+        return "Could not verify the LiveKit Cloud connection. Check the project URL and internet connection."
+    finally:
+        if client is not None:
+            await client.aclose()
+
+
+@app.get("/api/live-avatar/config")
+async def live_avatar_config():
+    required = ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
+    livekit_configured = all(os.environ.get(name) for name in required)
+    livekit_error = None
+    if livekit_configured:
+        livekit_error = await _livekit_credentials_error(
+            *(os.environ[name].strip() for name in required)
+        )
+    return {
+        "configured": bool(API_KEY and livekit_configured and not livekit_error),
+        "boson_configured": bool(API_KEY),
+        "livekit_configured": livekit_configured,
+        "livekit_error": livekit_error,
+        "video_price_usd_per_minute": 0.07,
+    }
+
+
+@app.get("/api/avatars")
+async def avatars_list():
+    if not API_KEY:
+        return _config_error()
+    return _relay(*_boson_request("GET", "/avatars"))
+
+
+@app.post("/api/live-avatar/sessions")
+async def live_avatar_session_create(request: Request):
+    if not API_KEY:
+        return _config_error()
+    livekit_url = os.environ.get("LIVEKIT_URL", "").strip()
+    livekit_key = os.environ.get("LIVEKIT_API_KEY", "").strip()
+    livekit_secret = os.environ.get("LIVEKIT_API_SECRET", "").strip()
+    if not all((livekit_url, livekit_key, livekit_secret)):
+        return JSONResponse(status_code=503, content={"error": {
+            "message": "Add LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET to .env from a LiveKit Cloud project, then restart LearnLoop.",
+            "type": "livekit_not_configured",
+        }})
+    livekit_error = await _livekit_credentials_error(livekit_url, livekit_key, livekit_secret)
+    if livekit_error:
+        return JSONResponse(status_code=401 if "(401)" in livekit_error else 503, content={"error": {
+            "message": livekit_error, "type": "livekit_auth_error" if "(401)" in livekit_error else "livekit_connection_error",
+        }})
+    body = await _json_body(request, default={})
+    if body is _INVALID:
+        return _bad_json()
+    avatar_id = str(body.get("avatar_id") or "builtin_emma_v1").strip()
+    if not avatar_id or len(avatar_id) > 256:
+        return JSONResponse(status_code=400, content={"error": {"message": "Choose a valid Boson avatar ID."}})
+
+    try:
+        from datetime import timedelta
+        from uuid import uuid4
+        from livekit import api, rtc
+        from livekit.agents.voice.avatar import DataStreamAudioOutput
+    except ImportError as exc:
+        return JSONResponse(status_code=503, content={"error": {
+            "message": "Live avatar support is not installed. Install the LiveKit dependencies listed in requirements-dev.txt and restart.",
+            "type": "livekit_dependency_missing",
+        }})
+
+    room_name = f"learnloop-{uuid4().hex[:18]}"
+    agent_identity = f"agent-{uuid4().hex[:8]}"
+    avatar_identity = "boson-avatar"
+    viewer_identity = f"viewer-{uuid4().hex[:8]}"
+    max_duration = 900
+
+    def token_for(identity: str, *, publish: bool, subscribe: bool) -> str:
+        token = (api.AccessToken(livekit_key, livekit_secret)
+            .with_identity(identity)
+            .with_grants(api.VideoGrants(
+                room_join=True, room=room_name, can_publish=publish,
+                can_subscribe=subscribe, can_publish_data=publish,
+            ))
+            .with_ttl(timedelta(seconds=max_duration + 300)))
+        return token.to_jwt()
+
+    avatar_token = token_for(avatar_identity, publish=True, subscribe=False)
+    agent_token = token_for(agent_identity, publish=True, subscribe=False)
+    viewer_token = token_for(viewer_identity, publish=False, subscribe=True)
+    avatar_payload = {
+        "model": "higgs-avatar",
+        "avatar_id": avatar_id,
+        "transport": {
+            "type": "livekit", "url": livekit_url, "room_name": room_name,
+            "participant_token": avatar_token, "participant_identity": avatar_identity,
+            "publisher_identity": agent_identity, "audio_source": "data_stream",
+        },
+        "max_duration_seconds": max_duration,
+    }
+
+    async def create_boson_session():
+        return await asyncio.to_thread(
+            _boson_request, "POST", "/avatar/sessions",
+            json_body=avatar_payload, include_headers=True,
+        )
+
+    # Only an explicit service_unavailable response is safe to retry. A lost
+    # response may have created a session, so never retry a timeout or 502.
+    for attempt in range(3):
+        status, content_type, raw, upstream_headers = await create_boson_session()
+        if status != 503 or attempt == 2:
+            break
+        try:
+            upstream_error = json.loads(raw.decode("utf-8")).get("error", {})
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            upstream_error = {}
+        if not isinstance(upstream_error, dict) or upstream_error.get("code") != "service_unavailable":
+            break
+        try:
+            retry_delay = float(upstream_headers.get("Retry-After", 1))
+        except (TypeError, ValueError):
+            retry_delay = 1.0
+        await asyncio.sleep(min(max(retry_delay, 2 ** attempt), 10))
+    if status not in (200, 201):
+        return _relay(status, content_type, raw, {
+            "Retry-After": upstream_headers.get("Retry-After"),
+            "X-Boson-Request-ID": upstream_headers.get("X-Request-ID"),
+        })
+    try:
+        boson_session = json.loads(raw.decode("utf-8"))
+        session_id = boson_session["id"]
+        room = rtc.Room()
+        await room.connect(livekit_url, agent_token)
+        audio_output = DataStreamAudioOutput(
+            room, destination_identity=avatar_identity, sample_rate=24000,
+            wait_remote_track=rtc.TrackKind.KIND_AUDIO,
+        )
+    except Exception as exc:
+        if "session_id" in locals():
+            await asyncio.to_thread(_boson_request, "DELETE", f"/avatar/sessions/{session_id}")
+        try:
+            if "room" in locals(): await room.disconnect()
+        except Exception:
+            pass
+        return JSONResponse(status_code=502, content={"error": {
+            "message": f"Boson started the avatar, but LearnLoop could not join its LiveKit room: {str(exc)[:240]}",
+            "type": "livekit_connect_error",
+        }})
+
+    relay_token = __import__("secrets").token_urlsafe(24)
+    LIVE_AVATAR_SESSIONS[session_id] = {
+        "room": room, "audio_output": audio_output, "relay_token": relay_token,
+        "avatar_identity": avatar_identity, "room_name": room_name,
+    }
+    return {
+        "session_id": session_id, "avatar_id": avatar_id, "avatar_identity": avatar_identity,
+        "livekit_url": livekit_url, "viewer_token": viewer_token, "relay_token": relay_token,
+        "max_duration_seconds": max_duration,
+    }
+
+
+@app.websocket("/api/live-avatar/sessions/{session_id}/audio")
+async def live_avatar_audio_relay(websocket: WebSocket, session_id: str):
+    session = LIVE_AVATAR_SESSIONS.get(session_id)
+    if not session:
+        await websocket.close(code=4404)
+        return
+    await websocket.accept()
+    playback_handler = None
+    try:
+        auth = await asyncio.wait_for(websocket.receive_json(), timeout=8)
+        if auth.get("type") != "auth" or auth.get("token") != session["relay_token"]:
+            await websocket.close(code=4401)
+            return
+        await websocket.send_json({"type": "ready"})
+        from livekit import rtc
+        import base64
+
+        async def send_playback_finished(interrupted: bool):
+            try:
+                await websocket.send_json({"type": "playback_finished", "interrupted": interrupted})
+            except Exception:
+                pass
+
+        def playback_handler(event):
+            asyncio.create_task(send_playback_finished(event.interrupted))
+
+        session["audio_output"].on("playback_finished", playback_handler)
+        while True:
+            message = await websocket.receive_json()
+            kind = message.get("type")
+            if kind == "audio":
+                try:
+                    pcm = base64.b64decode(message.get("delta", ""), validate=True)
+                except Exception:
+                    await websocket.send_json({"type": "error", "message": "Invalid audio frame."})
+                    continue
+                if not pcm or len(pcm) % 2:
+                    continue
+                frame = rtc.AudioFrame(pcm, 24000, 1, len(pcm) // 2)
+                await session["audio_output"].capture_frame(frame)
+            elif kind == "flush":
+                session["audio_output"].flush()
+            elif kind == "clear":
+                session["audio_output"].clear_buffer()
+    except WebSocketDisconnect:
+        return
+    except asyncio.TimeoutError:
+        await websocket.close(code=4408)
+    finally:
+        if playback_handler is not None:
+            session["audio_output"].off("playback_finished", playback_handler)
+
+
+@app.delete("/api/live-avatar/sessions/{session_id}")
+async def live_avatar_session_release(session_id: str):
+    session = LIVE_AVATAR_SESSIONS.pop(session_id, None)
+    if session:
+        try: session["audio_output"].clear_buffer()
+        except Exception: pass
+        try: await session["room"].disconnect()
+        except Exception: pass
+    if not API_KEY:
+        return _config_error()
+    return _relay(*await asyncio.to_thread(_boson_request, "DELETE", f"/avatar/sessions/{session_id}"))
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +549,173 @@ async def lecture_upload(background: BackgroundTasks,
 
     background.add_task(_run_progressive, video.id, str(final))
     return {"id": video.id, "status": "queued", "dedup": False}
+
+
+def _validate_public_video_url(url: str) -> str:
+    """Accept only public HTTP(S) URLs, including every redirect destination."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Enter a public http:// or https:// video URL.")
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
+    except OSError as exc:
+        raise ValueError("The video host could not be reached.") from exc
+    if not addresses:
+        raise ValueError("The video host could not be reached.")
+    for address in addresses:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+        if not ip.is_global:
+            raise ValueError("Only publicly accessible video links can be imported.")
+    return url
+
+
+class _PublicOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_video_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _is_youtube_url(url: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def _download_youtube_video(url: str, uploads: Path):
+    """Download one YouTube video to an isolated temp folder using yt-dlp."""
+    import tempfile
+    import yt_dlp
+    import imageio_ffmpeg
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="_youtube_", dir=uploads))
+    options = {
+        "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]",
+        "merge_output_format": "mp4",
+        "outtmpl": str(tmp_dir / "lecture.%(ext)s"),
+        "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
+        "max_filesize": MAX_UPLOAD_BYTES,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 2,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(url, download=True)
+        candidates = [p for p in tmp_dir.iterdir() if p.is_file() and p.suffix.lower() in (".mp4", ".webm")]
+        if not candidates:
+            raise ValueError("YouTube did not provide a downloadable MP4 or WebM video.")
+        path = max(candidates, key=lambda p: p.stat().st_size)
+        if path.stat().st_size > MAX_UPLOAD_BYTES:
+            raise ValueError(f"Video exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB import limit.")
+        return path, str((info or {}).get("title") or "YouTube lecture")[:180], tmp_dir
+    except Exception:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+
+@app.post("/api/lectures/import-url")
+async def lecture_import_url(request: Request, background: BackgroundTasks):
+    """Fetch a public direct MP4/WebM URL, retain it, then run normal processing."""
+    from app.config import DATA_DIR
+    from app.storage import Storage
+    import hashlib
+
+    try:
+        body = await request.json()
+        url = str(body.get("url", "")).strip()
+        if _is_youtube_url(url):
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+                raise ValueError("Enter a valid public YouTube video URL.")
+            if "list" in urllib.parse.parse_qs(parsed.query):
+                raise ValueError("Paste a single YouTube video link, not a playlist.")
+        else:
+            url = _validate_public_video_url(url)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": {"message": str(exc)}})
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "Enter a valid video URL."}})
+
+    uploads = Path(DATA_DIR) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    tmp = uploads / f"_url_{os.getpid()}_{id(request)}"
+    youtube_temp_dir = None
+    size = 0
+    hasher = hashlib.sha256()
+    try:
+        title = None
+        if _is_youtube_url(url):
+            downloaded, title, youtube_temp_dir = await asyncio.to_thread(_download_youtube_video, url, uploads)
+            ext = downloaded.suffix.lower()
+            downloaded.replace(tmp)
+        else:
+            opener = urllib.request.build_opener(_PublicOnlyRedirect())
+            req = urllib.request.Request(url, headers={"User-Agent": "LearnLoop/1.0"})
+            with opener.open(req, timeout=30) as response:
+                final_url = _validate_public_video_url(response.geturl())
+                mime = response.headers.get_content_type().lower()
+                final_path = urllib.parse.urlsplit(final_url).path.lower()
+                if final_path.endswith(".mp4") or mime == "video/mp4":
+                    ext = ".mp4"
+                elif final_path.endswith(".webm") or mime == "video/webm":
+                    ext = ".webm"
+                else:
+                    return JSONResponse(status_code=415, content={"error": {
+                        "message": "The link must point directly to an MP4 or WebM video file."}})
+                length = response.headers.get("Content-Length")
+                if length and int(length) > MAX_UPLOAD_BYTES:
+                    return JSONResponse(status_code=413, content={"error": {
+                        "message": f"Video exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB import limit."}})
+                with open(tmp, "wb") as fh:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_UPLOAD_BYTES:
+                            return JSONResponse(status_code=413, content={"error": {
+                                "message": f"Video exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB import limit."}})
+                        fh.write(chunk)
+        size = 0
+        hasher = hashlib.sha256()
+        with open(tmp, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    return JSONResponse(status_code=413, content={"error": {
+                        "message": f"Video exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB import limit."}})
+                hasher.update(chunk)
+        if size == 0:
+            return JSONResponse(status_code=400, content={"error": {"message": "The video link returned an empty file."}})
+        digest = hasher.hexdigest()
+        storage = Storage()
+        existing = storage.get_video_by_hash(digest)
+        if existing and existing.status in ("ready", "processing", "queued"):
+            return {"id": existing.id, "status": existing.status, "title": existing.title, "dedup": True}
+        if title is None:
+            parsed_path = urllib.parse.urlsplit(url).path
+            title = Path(parsed_path).name or "Linked lecture"
+        video = storage.create_video(title=title[:180], status="queued", stage="queued", content_hash=digest)
+        final = uploads / f"{video.id}{ext}"
+        tmp.replace(final)
+        background.add_task(_run_progressive, video.id, str(final))
+        return {"id": video.id, "status": "queued", "title": title[:180], "dedup": False}
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": {"message": str(exc)}})
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": f"Could not download that video: {getattr(exc, 'reason', str(exc))}"}})
+    except Exception as exc:
+        return JSONResponse(status_code=400, content={"error": {
+            "message": f"Could not import that video: {str(exc)[:300]}"}})
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        if youtube_temp_dir is not None:
+            import shutil
+            shutil.rmtree(youtube_temp_dir, ignore_errors=True)
 
 
 @app.get("/api/lectures/{video_id}/status")
@@ -556,6 +974,47 @@ async def lecture_search(video_id: str, q: str = ""):
         out.append({"seq": x.seq, "start": x.start_time, "end": x.end_time,
                     "text": x.text, "seek": seek})
     return {"video_id": video_id, "query": q, "count": len(out), "results": out}
+
+
+@app.post("/api/study-pack/export")
+async def study_pack_export(request: Request):
+    """Create an on-demand ZIP from the user's generated study pack and sources.
+
+    Nothing is exported until the user explicitly requests the download. The
+    archive contains the rendered guide, structured JSON, source transcript,
+    and saved-moment notes supplied by the browser.
+    """
+    import io
+    import re
+    import zipfile
+
+    raw = await request.body()
+    if len(raw) > 8 * 1024 * 1024:
+        return JSONResponse(status_code=413, content={"error": {"message": "Study pack export exceeds 8 MB."}})
+    try:
+        body = json.loads(raw.decode("utf-8") or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _bad_json()
+    if not isinstance(body, dict) or not isinstance(body.get("pack"), dict):
+        return JSONResponse(status_code=400, content={"error": {"message": "A generated study pack is required."}})
+
+    title = str(body.get("title") or "LearnLoop study pack").strip()[:160]
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-._")[:72] or "learnloop-study-pack"
+    transcript = body.get("transcript") if isinstance(body.get("transcript"), list) else []
+    bookmarks = body.get("saved_moments") if isinstance(body.get("saved_moments"), list) else []
+    guide = body.get("guide") if isinstance(body.get("guide"), str) else ""
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("Study Guide.md", guide or f"# {title}\n\nNo rendered guide was supplied.")
+        bundle.writestr("study-pack.json", json.dumps(body["pack"], ensure_ascii=False, indent=2))
+        bundle.writestr("source-transcript.json", json.dumps(transcript, ensure_ascii=False, indent=2))
+        bundle.writestr("saved-moments.json", json.dumps(bookmarks, ensure_ascii=False, indent=2))
+    return Response(
+        content=archive.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}-study-pack.zip"'},
+    )
 
 
 @app.api_route("/api/{rest:path}", methods=["GET", "POST", "DELETE", "PUT", "PATCH"])

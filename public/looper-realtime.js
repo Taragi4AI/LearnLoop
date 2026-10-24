@@ -7,8 +7,9 @@
 // before that. The long-lived API key stays server-side; this mints a short-lived
 // ephemeral secret via /api/realtime/client-secret and opens the WS itself.
 //
-// G3.2 scope: a working two-way voice conversation. NO lecture tools / transcript
-// grounding / seeking / bookmarks — those are G4.
+// Shared live-session client for voice practice and text-only study-pack writing.
+// Callers supply mode-specific instructions/tools; passive wake-word mode never
+// starts this client, and microphone capture begins only after explicit start().
 
 const WS_URL = 'wss://api.boson.ai/v1/realtime?model=higgs-realtime';
 const SAMPLE_RATE = 24000;
@@ -93,10 +94,14 @@ export const LOOPER_TOOLS = [
 export function createLooperSession({ onState, onUserText, onAssistantText, onReady, onToolCall,
                                       beforeAgentAudio, onAgentAudioStart, onAgentAudioEnd,
                                       onUserPending, onAssistantInterrupted, onResponseStart,
-                                      voice = 'default' } = {}) {
+                                      onAssistantAudioDelta, onAssistantAudioFlush, onAssistantAudioClear,
+                                      remotePlayback = false,
+                                      voice = 'default', instructions = LOOPER_INSTRUCTIONS,
+                                      tools = LOOPER_TOOLS, textOnly = false } = {}) {
   let ws = null;
   let audioCtx = null, micStream = null, micNode = null, micSource = null;
-  let outputGain = null, playHead = 0, scheduled = [];
+  let outputGain = null;
+  let playHead = 0, scheduled = [];
   let state = 'idle';     // idle | connecting | live | speaking | error | closed
   let starting = false;
   let activeResponseId = null;   // id of the response currently streaming (for stale-guarding)
@@ -105,17 +110,38 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   let speaking = false;       // currently detecting speech
   let silenceFrames = 0;      // consecutive quiet processor callbacks
   let awaitingAnswer = false;  // a turn is committed; ignore VAD until answered
+  let suppressCancelledOutput = false;
+  let playbackPending = false;
+  let playbackTimer = null;
+  let responseAudioMs = 0;
+  let micCooldownUntil = 0;
+  let bargeFrames = 0;
   const SPEECH_RMS = 0.015;   // above = speech
   const SILENCE_CALLBACKS = 12; // ~ (4096/24000)*12 ≈ 2s of silence ends a turn
 
   function setState(s, detail) { state = s; onState && onState(s, detail); }
 
   function detectTurnEnd(samples) {
-    if (awaitingAnswer || state === 'speaking') return;  // don't segment during answer
     let sum = 0;
     for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
     const rms = Math.sqrt(sum / samples.length);
-    if (rms > SPEECH_RMS) { speaking = true; silenceFrames = 0; }
+    if (Date.now() < micCooldownUntil) return;
+    if (awaitingAnswer || state === 'speaking') {
+      // Only a sustained, close-mic voice can interrupt the avatar. Its own
+      // speaker audio must never become a new learner turn.
+      if (state === 'speaking' && agentAudioOpen && rms > (remotePlayback ? 0.035 : SPEECH_RMS)) {
+        if (++bargeFrames >= (remotePlayback ? 2 : 1)) {
+          interruptAgent();
+          speaking = true;
+          onUserPending && onUserPending();
+        }
+      } else bargeFrames = 0;
+      return;
+    }
+    if (rms > SPEECH_RMS) {
+      if (!speaking) onUserPending && onUserPending();
+      speaking = true; silenceFrames = 0;
+    }
     else if (speaking) {
       silenceFrames++;
       if (silenceFrames >= SILENCE_CALLBACKS) {
@@ -125,9 +151,28 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     }
   }
 
+  function interruptAgent() {
+    // The mic is already streaming. Cancel the current answer and flush audio
+    // queued in WebAudio so the learner can take the floor immediately.
+    suppressCancelledOutput = true;
+    playbackPending = false;
+    clearTimeout(playbackTimer); playbackTimer = null;
+    send({ type: 'response.cancel' });
+    stopPlayback();
+    // clear_buffer drops queued sound; flush closes the current LiveKit data
+    // stream so the next answer starts as a separate utterance.
+    if (remotePlayback) onAssistantAudioFlush && onAssistantAudioFlush();
+    awaitingAnswer = false;
+    speaking = false; silenceFrames = 0; bargeFrames = 0;
+    if (onAssistantInterrupted) onAssistantInterrupted(activeResponseId);
+    else onAssistantText && onAssistantText('', true, activeResponseId);
+    setState('live', 'Listening — go ahead.');
+  }
+
   function commitTurn() {
     if (awaitingAnswer) return;
     awaitingAnswer = true;
+    onUserPending && onUserPending();
     setState('live', 'Thinking…');
     send({ type: 'input_audio_buffer.commit' });
     // Response is NOT requested here — the host sequencer injects context first,
@@ -136,7 +181,25 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
 
   /** Called by the host (via the turn sequencer) AFTER context is injected. */
   function requestResponse() {
+    awaitingAnswer = true;
     send({ type: 'response.create' });
+  }
+
+  function finishAssistantTurn() {
+    if (!playbackPending) return;
+    playbackPending = false;
+    clearTimeout(playbackTimer); playbackTimer = null;
+    awaitingAnswer = false;
+    speaking = false; silenceFrames = 0; bargeFrames = 0;
+    micCooldownUntil = Date.now() + 180;
+    agentAudioOpen = false;
+    onAgentAudioEnd && onAgentAudioEnd();
+    setState('live', 'Listening — speak now.');
+  }
+
+  function avatarPlaybackFinished(event) {
+    // A late clear-buffer acknowledgement belongs to an interrupted reply.
+    if (remotePlayback && !event?.interrupted) finishAssistantTurn();
   }
 
   /** Return a tool-call result to the model and continue the response (G5).
@@ -193,11 +256,11 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
       session: {
         type: 'realtime',
         model: 'higgs-realtime',
-        instructions: LOOPER_INSTRUCTIONS,
-        output_modalities: ['audio'],
-        tools: LOOPER_TOOLS,
+        instructions,
+        output_modalities: textOnly ? ['text'] : ['audio'],
+        tools: textOnly ? [] : tools,
         tool_choice: 'auto',
-        audio: {
+        ...(!textOnly ? { audio: {
           input: {
             format: { type: 'audio/pcm', rate: SAMPLE_RATE },
             transcription: { model: 'higgs-stt-3.1', language: null },
@@ -208,14 +271,14 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
             turn_detection: null,
           },
           output: { format: { type: 'audio/pcm', rate: SAMPLE_RATE }, voice },
-        },
+        } } : {}),
         temperature: 0.3,
         max_output_tokens: 'inf',
       },
     });
     try {
-      await startMic();                       // mic streaming begins HERE, post-activation only
-      setState('live', 'Listening — speak now.');
+      if (!textOnly) await startMic();        // mic streaming begins only after explicit activation
+      setState('live', textOnly ? 'Text session ready.' : 'Listening — speak now.');
       starting = false;
       onReady && onReady();                   // host injects initial lecture context (G4)
     } catch (err) {
@@ -229,36 +292,46 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     switch (msg.type) {
       case 'session.created': setState('live', 'Session ready — speak now.'); break;
       case 'input_audio_buffer.speech_started':
-        // Barge-in: stop Looper audio and tell the host its current (possibly
-        // partial) assistant bubble was interrupted, not completed.
         stopPlayback();
         if (agentAudioOpen) onAssistantInterrupted && onAssistantInterrupted(activeResponseId);
         agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
+        if (remotePlayback) onAssistantAudioFlush && onAssistantAudioFlush();
         onUserPending && onUserPending();      // user is speaking → show provisional bubble
         setState('live', 'Listening…'); break;
       case 'input_audio_buffer.speech_stopped':
         onUserPending && onUserPending();      // ensure a provisional user bubble exists
         setState('live', 'Thinking…'); break;
       case 'response.created':
-        // Track the active response id so the host can key its bubble to THIS
-        // response and reject deltas that belong to an older/newer one.
+        suppressCancelledOutput = false;
         activeResponseId = (msg.response && msg.response.id) || msg.response_id || activeResponseId;
         onResponseStart && onResponseStart(activeResponseId);
-        setState('speaking', 'Looper is responding…'); agentAudioOpen = false; break;
+        setState('speaking', 'Looper is responding…');
+        agentAudioOpen = false; responseAudioMs = 0; break;
       case 'response.output_audio.delta':
       case 'response.audio.delta':
-        if (msg.delta) gateAndPlay(msg.delta);
+        if (msg.delta && !suppressCancelledOutput) gateAndPlay(msg.delta);
         break;
       case 'response.output_audio_transcript.delta':
       case 'response.audio_transcript.delta':
-        // Pass the response id so the host associates this delta with the right
-        // message and ignores stale deltas from a superseded response.
-        if (msg.delta) onAssistantText && onAssistantText(msg.delta, false, msg.response_id || activeResponseId);
+      case 'response.output_text.delta':
+      case 'response.text.delta':
+        if (msg.delta && !suppressCancelledOutput) {
+          onAssistantText && onAssistantText(msg.delta, false, msg.response_id || activeResponseId);
+        }
         break;
       case 'conversation.item.input_audio_transcription.completed':
         if (msg.transcript) onUserText && onUserText(msg.transcript);
         break;
       case 'response.done': {
+        if (suppressCancelledOutput) {
+          awaitingAnswer = false;
+          playbackPending = false;
+          clearTimeout(playbackTimer); playbackTimer = null;
+          agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
+          setState('live', 'Listening — speak now.');
+          break;
+        }
+        onAssistantAudioFlush && onAssistantAudioFlush();
         // A response may END in client tool calls (G5). Execute those and
         // continue; only a response.done with NO client calls is the final turn.
         const output = (msg.response && msg.response.output) || [];
@@ -289,9 +362,19 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
           } catch {}
           onAssistantText && onAssistantText('', true, doneId, finalText);
         }
-        awaitingAnswer = false;               // ready for the next manual turn
-        agentAudioOpen = false; onAgentAudioEnd && onAgentAudioEnd();
-        setState('live', 'Listening — speak now.');
+        if (agentAudioOpen && agentAudioAllowed) {
+          playbackPending = true;
+          setState('speaking', 'Looper is finishing her reply…');
+          if (remotePlayback) {
+            // Boson reports playout completion after the avatar actually
+            // finishes speaking. The fallback prevents a stuck UI if lost.
+            playbackTimer = setTimeout(finishAssistantTurn,
+              Math.min(60000, Math.max(10000, responseAudioMs + 10000)));
+          } else if (!scheduled.length) finishAssistantTurn();
+        } else {
+          playbackPending = true;
+          finishAssistantTurn();
+        }
         break;
       }
       case 'error':
@@ -317,7 +400,11 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
       if (agentAudioAllowed) { onAgentAudioStart && onAgentAudioStart(); setState('speaking', 'Looper is speaking…'); }
       else { setState('error', 'Could not pause the lecture; suppressing Looper audio to avoid overlap.'); }
     }
-    if (agentAudioAllowed) playPcmChunk(base64);
+    if (agentAudioAllowed) {
+      responseAudioMs += Math.floor(base64.length * 3 / 4) / (SAMPLE_RATE * 2) * 1000;
+      onAssistantAudioDelta && onAssistantAudioDelta(base64);
+      if (!remotePlayback) playPcmChunk(base64);
+    }
   }
 
   /** Inject a grounding/context text message into the live conversation (G4).
@@ -342,6 +429,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     micSource = audioCtx.createMediaStreamSource(micStream);
 
     outputGain = audioCtx.createGain();
+    outputGain.gain.value = remotePlayback ? 0 : 1;
     outputGain.connect(audioCtx.destination);
 
     micNode = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -373,13 +461,17 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     srcNode.start(playHead);
     playHead += buffer.duration;
     scheduled.push(srcNode);
-    srcNode.onended = () => { scheduled = scheduled.filter((s) => s !== srcNode); };
+    srcNode.onended = () => {
+      scheduled = scheduled.filter((s) => s !== srcNode);
+      if (!remotePlayback && playbackPending && !scheduled.length) finishAssistantTurn();
+    };
   }
 
   function stopPlayback() {
     scheduled.forEach((s) => { try { s.stop(); } catch {} });
     scheduled = [];
     if (audioCtx) playHead = audioCtx.currentTime;
+    if (remotePlayback) onAssistantAudioClear && onAssistantAudioClear();
   }
 
   function teardownAudio() {
@@ -393,6 +485,8 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
   }
 
   function stop() {
+    playbackPending = false;
+    clearTimeout(playbackTimer); playbackTimer = null;
     try { ws && ws.close(); } catch {}
     ws = null;
     teardownAudio();
@@ -400,7 +494,7 @@ export function createLooperSession({ onState, onUserText, onAssistantText, onRe
     setState('closed', 'Session stopped.');
   }
 
-  return { start, stop, sendContext, requestResponse, returnToolResult, get state() { return state; } };
+  return { start, stop, interrupt: interruptAgent, avatarPlaybackFinished, sendContext, requestResponse, returnToolResult, get state() { return state; } };
 }
 
 // ---- PCM / base64 helpers (from the proven playground client) ----
