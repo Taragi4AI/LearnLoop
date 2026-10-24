@@ -46,6 +46,7 @@ let liveAvatarSession = null;
 let liveKitRoom = null;
 let avatarRelay = null;
 let remoteAvatarAudio = [];
+let sessionStartSerial = 0;
 
 async function loadAvatarOptions() {
   try {
@@ -96,7 +97,11 @@ async function startLiveAvatar() {
     const requestId = response.headers.get('X-Boson-Request-ID');
     const requestHint = requestId ? ` Boson request ID: ${requestId}.` : '';
     const message = detail.message || 'Live avatar setup failed.';
-    throw new Error(`${message}${codes ? ` [${codes}]` : ''} (HTTP ${response.status}).${retryHint}${requestHint}`);
+    const error = new Error(`${message}${codes ? ` [${codes}]` : ''} (HTTP ${response.status}).${retryHint}${requestHint}`);
+    error.status = response.status;
+    error.code = detail.code;
+    error.retryAfter = Number(retryAfter) || 5;
+    throw error;
   }
   liveAvatarSession = data;
 
@@ -317,25 +322,40 @@ function startClock() {
 async function startSession() {
   if (!activeLecture || activeLecture.status !== 'ready') { setError('Choose a processed lecture before starting practice.'); return; }
   if (looper && !['closed', 'error'].includes(looper.state)) return;
+  const startSerial = ++sessionStartSerial;
   setError(''); turnCount = 0; els.turnCount.textContent = '0'; els.ring.style.setProperty('--progress', '0%');
+  els.start.textContent = 'Start speaking with Looper';
   currentAssistantBubble = null;
   els.elapsed.textContent = '0:00'; els.modeValue.textContent = MODES[activeMode].label;
   timedSession = activeMode === 'mcq'; els.timerChip.classList.toggle('hidden', !timedSession);
   els.start.disabled = true; els.stop.disabled = false;
-  addBubble('system', `${MODES[activeMode].label} · ${activeLecture.title}`);
   turnSeq.setLecture(activeLecture.id);
   let useLiveAvatar = false;
+  setRoomState('connecting', 'Requesting a live Higgs Avatar slot…');
   try {
     await startLiveAvatar();
+    if (startSerial !== sessionStartSerial) { await stopLiveAvatar(); return; }
     useLiveAvatar = true;
     els.avatarTools.dataset.ready = 'true';
     els.avatarTools.dataset.warning = 'false';
     els.avatarSetupNote.textContent = 'Higgs Avatar is live and lip-syncing to Looper.';
   } catch (error) {
     await stopLiveAvatar();
+    if (startSerial !== sessionStartSerial) return;
     els.avatarTools.dataset.warning = 'true';
+    if (error.status === 429 && error.code === 'capacity_exhausted') {
+      const waitSeconds = Math.min(60, Math.max(1, Math.ceil(error.retryAfter)));
+      els.avatarSetupNote.textContent = `Boson has no free avatar slots. Try again after ${waitSeconds} seconds.`;
+      setRoomState('idle');
+      setError(`The live avatar is busy. Wait at least ${waitSeconds} seconds, then try again.`);
+      els.start.textContent = 'Try avatar again';
+      els.start.disabled = false;
+      els.stop.disabled = true;
+      return;
+    }
     els.avatarSetupNote.textContent = `Audio-only this session: ${error.message}`;
   }
+  addBubble('system', `${MODES[activeMode].label} · ${activeLecture.title}`);
   looper = createLooperSession({
     instructions: `${MODES[activeMode].instructions} The selected source is “${activeLecture.title}”. Start by briefly welcoming the learner and asking the first question appropriate to this mode.`,
     tools: [],
@@ -563,6 +583,7 @@ async function exportStudyPack() {
 }
 
 async function stopSession() {
+  sessionStartSerial++;
   clearInterval(tickTimer); tickTimer = null;
   if (looper) { looper.stop(); looper = null; }
   await stopLiveAvatar();
